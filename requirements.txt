@@ -1,0 +1,8 @@
+requests
+websocket-client
+python-dotenv
+PySide6
+qasync
+aiohttp
+websockets
+py-clob-client

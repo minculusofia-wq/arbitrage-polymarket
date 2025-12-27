@@ -1,0 +1,29 @@
+# Environment
+.env
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Logs
+logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Secrets - NEVER commit these
+*.pem
+*.key
+credentials.json
