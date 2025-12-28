@@ -14,6 +14,7 @@ from backend.logger import logger
 from backend.services.trade_storage import TradeStorage
 from backend.services.rate_limiter import APIRateLimiter
 from backend.services.risk_manager import RiskManager
+from backend.services.position_monitor import PositionMonitor, ExitExecutor, BalanceManager
 
 # Constants
 MAX_EXECUTION_WINDOW = 20  # seconds
@@ -391,6 +392,95 @@ class ArbitrageBot:
 
         self.simulated_balance = config.FALLBACK_BALANCE  # Fallback if API fails to read balance
 
+        # ============================================
+        # PHASE 3: POSITION MONITORING & BALANCE
+        # ============================================
+        self.balance_manager = BalanceManager(self.client, config.FALLBACK_BALANCE)
+        self.exit_executor = ExitExecutor(self.client, self.rate_limiter)
+        self.position_monitor = PositionMonitor(
+            risk_manager=self.risk_manager,
+            check_interval=5.0,
+            on_exit_signal=self._handle_exit_signal
+        )
+
+    async def _handle_exit_signal(self, position: dict, reason: str):
+        """Handle exit signal from position monitor."""
+        logger.warning(f"Processing exit signal: {reason} for {position.get('market_id')}")
+
+        # Get current prices
+        yes_price, no_price = self._get_position_prices(position)
+        if yes_price is None:
+            logger.error("Cannot execute exit: prices unavailable")
+            return
+
+        # Execute the exit
+        result = await self.exit_executor.execute_exit(
+            position, reason, yes_price, no_price
+        )
+
+        if result.get('success'):
+            # Update position status
+            position['status'] = 'CLOSED'
+            position['exit_reason'] = reason
+            position['exit_value'] = result.get('exit_value')
+            position['realized_pnl'] = result.get('realized_pnl')
+
+            # Record P&L
+            self.risk_manager.record_pnl(result.get('realized_pnl', 0))
+
+            # Update in database
+            if 'id' in position:
+                self.trade_storage.update_trade_status(position['id'], 'CLOSED')
+
+            # Invalidate balance cache
+            self.balance_manager.invalidate_cache()
+
+            # Notify UI
+            if self.on_trade:
+                self.on_trade(position)
+
+            logger.info(f"Position closed: {reason}, P&L: ${result.get('realized_pnl', 0):.2f}")
+
+    def _get_position_prices(self, position: dict) -> tuple:
+        """Get current prices for a position."""
+        market_id = position.get('market_id')
+        market = self.market_details.get(market_id)
+
+        if not market or 'tokens' not in market:
+            return None, None
+
+        yes_token = market['tokens'][0]['token_id']
+        no_token = market['tokens'][1]['token_id']
+
+        yes_bids = self.order_books.get(yes_token, {}).get('bids', [])
+        no_bids = self.order_books.get(no_token, {}).get('bids', [])
+
+        if not yes_bids or not no_bids:
+            return None, None
+
+        return float(yes_bids[0]['price']), float(no_bids[0]['price'])
+
+    async def manual_exit_position(self, position_id: str) -> bool:
+        """
+        Manually exit a specific position.
+
+        Args:
+            position_id: Market ID or database ID of position to exit.
+
+        Returns:
+            True if exit was initiated, False otherwise.
+        """
+        return await self.position_monitor.manual_exit(position_id)
+
+    def get_open_positions_with_values(self) -> list:
+        """
+        Get all open positions with current market values.
+
+        Returns:
+            List of positions with unrealized P&L.
+        """
+        return self.position_monitor.get_open_positions()
+
     async def fetch_markets(self):
         """
         Fetches active markets to monitor.
@@ -518,7 +608,11 @@ class ArbitrageBot:
                 self.order_books[tid]['asks'] = data['asks']
             if 'bids' in data:
                 self.order_books[tid]['bids'] = data['bids']
-            
+
+            # Update position monitor with latest order book and positions
+            self.position_monitor.update_order_books(self.order_books)
+            self.position_monitor.update_positions(self.positions)
+
             # Find which market this token belongs to
             # Then check Arb for that market
             await self.check_arbitrage(tid)
@@ -680,6 +774,13 @@ class ArbitrageBot:
         try:
             start_time = time.time()
 
+            # PHASE 3: Verify sufficient balance before trade
+            required_amount = shares * (price_yes + price_no)
+            can_trade, balance, message = await self.balance_manager.can_trade(required_amount)
+            if not can_trade:
+                logger.warning(f"Balance check failed: {message}")
+                return False
+
             # Re-verify liquidity before execution
             ask_yes = self.order_books.get(yes_token, {}).get('asks', [])
             ask_no = self.order_books.get(no_token, {}).get('asks', [])
@@ -745,6 +846,8 @@ class ArbitrageBot:
                     "roi": (1.0 - current_cost) / current_cost * 100,
                     "yes_price": yes_result.effective_price,
                     "no_price": no_result.effective_price,
+                    "yes_token": yes_token,  # For exit execution
+                    "no_token": no_token,    # For exit execution
                     "status": "EXECUTED",
                     "timestamp": datetime.now(),
                     "levels_yes": yes_result.levels_consumed,
@@ -756,12 +859,16 @@ class ArbitrageBot:
                 # PHASE 2: Persist trade to database
                 try:
                     trade_id = self.trade_storage.save_trade(trade_record)
+                    trade_record['id'] = trade_id  # Store ID for status updates
                     logger.debug(f"Trade saved to database with ID: {trade_id}")
                 except Exception as e:
                     logger.error(f"Failed to save trade to database: {e}")
 
                 # PHASE 2: Record P&L for daily tracking
                 self.risk_manager.record_pnl(profit)
+
+                # PHASE 3: Invalidate balance cache
+                self.balance_manager.invalidate_cache()
 
                 # Notify UI about trade
                 if self.on_trade:
@@ -875,6 +982,11 @@ class ArbitrageBot:
         logger.info("Starting Arbitrage Engine...")
         await self.fetch_markets()
 
+        # Start position monitor for stop-loss/take-profit
+        self.position_monitor.update_market_data(self.token_to_market, self.market_details)
+        self.position_monitor.start()
+        logger.info("Position Monitor started")
+
         while self.running:
             try:
                 await self.connect_and_listen()
@@ -895,6 +1007,8 @@ class ArbitrageBot:
                 logger.error(f"Unexpected error in main loop: {e}")
                 await self._handle_reconnection(str(e))
 
+        # Stop position monitor
+        self.position_monitor.stop()
         logger.info("Arbitrage Engine stopped.")
 
     async def _handle_reconnection(self, error_msg: str):

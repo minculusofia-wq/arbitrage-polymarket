@@ -32,6 +32,12 @@ A professional-grade arbitrage trading bot for Polymarket prediction markets. Au
 - **Trade Persistence** - SQLite database saves all trades (survives restarts)
 - **API Rate Limiter** - Prevents API bans with sliding window throttling
 
+### Position Management (Phase 3)
+- **Position Monitor** - Real-time monitoring of open positions with P&L
+- **Manual Exit** - Exit any position manually at any time
+- **Automatic Exit Execution** - Sells both YES/NO tokens when exit triggers
+- **Balance Verification** - Checks USDC balance before each trade
+
 ### User Interface
 - **PnL Dashboard** - Real-time balance, daily/total P&L, win rate, ROI
 - **Trade History** - Historical trades table with CSV export
@@ -141,7 +147,8 @@ arbitrage-poly/
 │   │   ├── market_scorer.py   # Market quality scoring
 │   │   ├── trade_storage.py   # SQLite trade persistence
 │   │   ├── rate_limiter.py    # API rate limiting
-│   │   └── risk_manager.py    # Stop-loss, take-profit, daily limits
+│   │   ├── risk_manager.py    # Stop-loss, take-profit, daily limits
+│   │   └── position_monitor.py # Position monitoring & manual exits
 │   └── models/           # Data models
 │       ├── order_book.py      # Optimized with SortedDict
 │       └── trade.py
@@ -155,7 +162,7 @@ arbitrage-poly/
 │       ├── pnl_dashboard.py    # P&L performance dashboard
 │       └── trade_history.py    # Trade history + CSV export
 │
-├── tests/                 # Unit tests (155 tests)
+├── tests/                 # Unit tests (179 tests)
 │   ├── test_market_impact.py
 │   ├── test_market_scorer.py
 │   ├── test_slippage.py
@@ -165,7 +172,8 @@ arbitrage-poly/
 │   ├── test_order_book.py
 │   ├── test_trade_storage.py  # Trade persistence tests
 │   ├── test_rate_limiter.py   # Rate limiting tests
-│   └── test_risk_manager.py   # Risk management tests
+│   ├── test_risk_manager.py   # Risk management tests
+│   └── test_position_monitor.py # Position monitor tests
 │
 ├── data/                  # Persistent data
 │   └── trades.db          # SQLite trade database
@@ -227,7 +235,7 @@ prices across order book depth before trading.
 python3.11 -m pytest tests/ -v
 ```
 
-155 tests covering market impact, slippage, cooldown, execution lock, opportunity cache, order book, market scoring, trade storage, rate limiting, and risk management.
+179 tests covering market impact, slippage, cooldown, execution lock, opportunity cache, order book, market scoring, trade storage, rate limiting, risk management, and position monitoring.
 
 ## License
 
