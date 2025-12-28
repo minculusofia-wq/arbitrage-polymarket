@@ -334,6 +334,15 @@ class ArbitrageBot:
         self.token_to_market: Dict[str, str] = {} # token_id -> market_id (for fast O(1) lookup)
         self.markets_whitelist: List[str] = [] # condition_ids or token_ids
         self.on_opportunity = None # Callback function(market_id, yes_price, no_price)
+        self.on_trade = None # Callback function(trade_dict) for trade history
+
+        # ============================================
+        # RECONNECTION RESILIENCE
+        # ============================================
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 10
+        self.base_reconnect_delay = 5  # seconds
+        self.max_reconnect_delay = 60  # seconds
 
         # ============================================
         # OPTIMIZATION MANAGERS
@@ -701,17 +710,34 @@ class ArbitrageBot:
 
             if success:
                 profit = shares * (1.0 - current_cost)
+                entry_cost = shares * current_cost
                 logger.info(f"Trade Executed Successfully. Expected profit: ${profit:.2f}")
-                self.positions.append({
-                    "market": market_id,
-                    "size": shares,
-                    "entry": current_cost,
-                    "effective_yes": yes_result.effective_price,
-                    "effective_no": no_result.effective_price,
+
+                from datetime import datetime
+                trade_record = {
+                    "market_id": market_id,
+                    "side": "BOTH",
+                    "shares": shares,
+                    "entry_cost": entry_cost,
+                    "exit_value": shares,  # $1 per share at resolution
+                    "pnl": profit,
+                    "roi": (1.0 - current_cost) / current_cost * 100,
+                    "yes_price": yes_result.effective_price,
+                    "no_price": no_result.effective_price,
+                    "status": "EXECUTED",
+                    "timestamp": datetime.now(),
                     "levels_yes": yes_result.levels_consumed,
-                    "levels_no": no_result.levels_consumed,
-                    "time": time.time()
-                })
+                    "levels_no": no_result.levels_consumed
+                }
+
+                self.positions.append(trade_record)
+
+                # Notify UI about trade
+                if self.on_trade:
+                    try:
+                        self.on_trade(trade_record)
+                    except Exception as e:
+                        logger.error(f"Trade callback error: {e}")
 
                 self.cooldown_manager.record_trade(market_id)
                 self.opportunity_manager.mark_executed(market_id)
@@ -806,12 +832,72 @@ class ArbitrageBot:
             raise e
 
     async def run(self):
+        """
+        Main run loop with resilient reconnection.
+        Automatically reconnects on WebSocket failures with exponential backoff.
+        """
         self.running = True
         logger.info("Starting Arbitrage Engine...")
         await self.fetch_markets()
-        await self.connect_and_listen()
+
+        while self.running:
+            try:
+                await self.connect_and_listen()
+
+                # If connect_and_listen returns normally, reset attempts
+                self.reconnect_attempts = 0
+
+            except websockets.exceptions.ConnectionClosed as e:
+                await self._handle_reconnection(f"Connection closed: {e}")
+
+            except websockets.exceptions.InvalidStatusCode as e:
+                await self._handle_reconnection(f"Invalid status code: {e}")
+
+            except ConnectionRefusedError as e:
+                await self._handle_reconnection(f"Connection refused: {e}")
+
+            except Exception as e:
+                logger.error(f"Unexpected error in main loop: {e}")
+                await self._handle_reconnection(str(e))
+
+        logger.info("Arbitrage Engine stopped.")
+
+    async def _handle_reconnection(self, error_msg: str):
+        """
+        Handle WebSocket reconnection with exponential backoff.
+        """
+        self.reconnect_attempts += 1
+
+        if self.reconnect_attempts > self.max_reconnect_attempts:
+            logger.critical(
+                f"Max reconnection attempts ({self.max_reconnect_attempts}) reached. "
+                "Stopping engine. Manual restart required."
+            )
+            self.running = False
+            return
+
+        # Exponential backoff with cap
+        delay = min(
+            self.base_reconnect_delay * (2 ** (self.reconnect_attempts - 1)),
+            self.max_reconnect_delay
+        )
+
+        logger.warning(
+            f"Connection error: {error_msg}. "
+            f"Reconnecting in {delay}s (attempt {self.reconnect_attempts}/{self.max_reconnect_attempts})"
+        )
+
+        await asyncio.sleep(delay)
+
+        # Refresh markets on reconnect (they may have changed)
+        try:
+            logger.info("Refreshing markets before reconnection...")
+            await self.fetch_markets()
+        except Exception as e:
+            logger.error(f"Failed to refresh markets: {e}")
 
     def stop(self):
         self.running = False
+        self.reconnect_attempts = 0
         logger.info("Stopping Engine...")
 
