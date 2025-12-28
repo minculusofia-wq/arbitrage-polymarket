@@ -25,6 +25,13 @@ A professional-grade arbitrage trading bot for Polymarket prediction markets. Au
 - **Auto-Reconnection** - WebSocket reconnects with exponential backoff (5s → 60s)
 - **Market Quality Scoring** - Prioritizes markets by volume, liquidity, spread, time
 
+### Risk Management (Phase 2)
+- **Stop-Loss** - Automatic position exit at configurable loss threshold
+- **Take-Profit** - Lock in gains at configurable profit threshold
+- **Daily Loss Limit** - Halts trading when daily losses exceed limit
+- **Trade Persistence** - SQLite database saves all trades (survives restarts)
+- **API Rate Limiter** - Prevents API bans with sliding window throttling
+
 ### User Interface
 - **PnL Dashboard** - Real-time balance, daily/total P&L, win rate, ROI
 - **Trade History** - Historical trades table with CSV export
@@ -95,6 +102,14 @@ Edit `.env` or configure directly in the application:
 | `MIN_PROFIT_MARGIN` | Minimum profit margin (0-1) | `0.02` (2%) |
 | `MIN_MARKET_VOLUME` | Minimum market volume filter | `5000` |
 
+### Risk Management (Optional)
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `STOP_LOSS` | Stop loss threshold (0-1) | `0.05` (5%) |
+| `TAKE_PROFIT` | Take profit threshold (0-1) | `0.10` (10%) |
+| `MAX_DAILY_LOSS` | Maximum daily loss in USD | `50.0` |
+
 ### Advanced Settings (Optional)
 
 | Parameter | Description | Default |
@@ -123,7 +138,10 @@ arbitrage-poly/
 │   │   ├── market_service.py
 │   │   ├── websocket_service.py
 │   │   ├── order_service.py
-│   │   └── market_scorer.py   # Market quality scoring
+│   │   ├── market_scorer.py   # Market quality scoring
+│   │   ├── trade_storage.py   # SQLite trade persistence
+│   │   ├── rate_limiter.py    # API rate limiting
+│   │   └── risk_manager.py    # Stop-loss, take-profit, daily limits
 │   └── models/           # Data models
 │       ├── order_book.py      # Optimized with SortedDict
 │       └── trade.py
@@ -137,14 +155,20 @@ arbitrage-poly/
 │       ├── pnl_dashboard.py    # P&L performance dashboard
 │       └── trade_history.py    # Trade history + CSV export
 │
-├── tests/                 # Unit tests (86 tests)
+├── tests/                 # Unit tests (155 tests)
 │   ├── test_market_impact.py
 │   ├── test_market_scorer.py
 │   ├── test_slippage.py
 │   ├── test_cooldown.py
 │   ├── test_execution_lock.py
 │   ├── test_opportunity.py
-│   └── test_order_book.py
+│   ├── test_order_book.py
+│   ├── test_trade_storage.py  # Trade persistence tests
+│   ├── test_rate_limiter.py   # Rate limiting tests
+│   └── test_risk_manager.py   # Risk management tests
+│
+├── data/                  # Persistent data
+│   └── trades.db          # SQLite trade database
 │
 └── logs/                  # Trading logs
     └── bot.log
@@ -160,6 +184,8 @@ arbitrage-poly/
 6. **Slippage Check** - Verifies prices haven't moved before execution
 7. **Trade Execution** - Places parallel FOK orders for both outcomes
 8. **Position Tracking** - Logs executed trades, updates PnL dashboard
+9. **Risk Management** - Monitors daily P&L, enforces stop-loss/take-profit
+10. **Trade Persistence** - Saves all trades to SQLite for recovery
 
 ### Why Market Impact Matters
 
@@ -201,7 +227,7 @@ prices across order book depth before trading.
 python3.11 -m pytest tests/ -v
 ```
 
-86 tests covering market impact, slippage, cooldown, execution lock, opportunity cache, order book, and market scoring.
+155 tests covering market impact, slippage, cooldown, execution lock, opportunity cache, order book, market scoring, trade storage, rate limiting, and risk management.
 
 ## License
 

@@ -11,6 +11,9 @@ from py_clob_client.order_builder.constants import BUY
 from py_clob_client.constants import POLYGON
 from backend.config import Config
 from backend.logger import logger
+from backend.services.trade_storage import TradeStorage
+from backend.services.rate_limiter import APIRateLimiter
+from backend.services.risk_manager import RiskManager
 
 # Constants
 MAX_EXECUTION_WINDOW = 20  # seconds
@@ -351,6 +354,13 @@ class ArbitrageBot:
         self.cooldown_manager = CooldownManager(config.COOLDOWN_SECONDS)
         self.execution_lock = ExecutionLock()
         self.opportunity_manager = OpportunityManager(config.MIN_PROFIT_MARGIN)
+
+        # ============================================
+        # PHASE 2: ADVANCED SERVICES
+        # ============================================
+        self.trade_storage = TradeStorage()
+        self.rate_limiter = APIRateLimiter()
+        self.risk_manager = RiskManager.from_config(config)
         
         # Initialize Clob Client (Synchronous)
         # We will run blocking calls in executor
@@ -388,16 +398,19 @@ class ArbitrageBot:
         """
         logger.info("Fetching markets...")
         try:
+            # PHASE 2: Rate limit API calls
+            await self.rate_limiter.acquire('markets')
+
             # Run blocking call in executor
             loop = asyncio.get_running_loop()
             # Fetching simplified list - in prod strict filtering needed
             # We fetch markets with volume > configured
             # Using next_cursor logic if needed, simplified here to get top 100 relevant
             markets = await loop.run_in_executor(
-                None, 
+                None,
                 lambda: self.client.get_markets(
-                    limit=50, 
-                    active=True, 
+                    limit=50,
+                    active=True,
                     volume_min=self.config.MIN_MARKET_VOLUME
                 )
             )
@@ -520,6 +533,10 @@ class ArbitrageBot:
         "YES=0.45 + NO=0.50 = 0.95" but actually pay ~1.02 when buying
         large quantities that consume multiple price levels.
         """
+        # PHASE 2: Check daily loss limit before processing
+        if not self.risk_manager.check_daily_limit():
+            return  # Daily loss limit reached, stop trading
+
         # Fast O(1) lookup using token_to_market index
         market_id = self.token_to_market.get(token_id)
         if not market_id:
@@ -695,6 +712,10 @@ class ArbitrageBot:
 
             loop = asyncio.get_running_loop()
 
+            # PHASE 2: Rate limit order API calls (acquire 2 slots for parallel orders)
+            await self.rate_limiter.acquire('orders')
+            await self.rate_limiter.acquire('orders')
+
             # Execute both orders in parallel with effective prices
             t1 = loop.run_in_executor(
                 None,
@@ -731,6 +752,16 @@ class ArbitrageBot:
                 }
 
                 self.positions.append(trade_record)
+
+                # PHASE 2: Persist trade to database
+                try:
+                    trade_id = self.trade_storage.save_trade(trade_record)
+                    logger.debug(f"Trade saved to database with ID: {trade_id}")
+                except Exception as e:
+                    logger.error(f"Failed to save trade to database: {e}")
+
+                # PHASE 2: Record P&L for daily tracking
+                self.risk_manager.record_pnl(profit)
 
                 # Notify UI about trade
                 if self.on_trade:
@@ -784,6 +815,10 @@ class ArbitrageBot:
             logger.info(f"Buying {shares} shares of YES and NO.")
 
             loop = asyncio.get_running_loop()
+
+            # PHASE 2: Rate limit order API calls
+            await self.rate_limiter.acquire('orders')
+            await self.rate_limiter.acquire('orders')
 
             # Execute both orders in parallel
             t1 = loop.run_in_executor(None, lambda: self._place_order(yes_token, shares, price_yes))
