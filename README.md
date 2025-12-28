@@ -8,20 +8,37 @@ A professional-grade arbitrage trading bot for Polymarket prediction markets. Au
 
 ## Features
 
+### Core Trading
 - **Real-time Market Monitoring** - WebSocket connection to Polymarket order books
 - **Automatic Arbitrage Detection** - Finds opportunities where YES + NO < 1.0
 - **Parallel Order Execution** - Simultaneous BUY orders for both legs
 - **Fill-or-Kill Orders** - Minimizes partial fill risk
+
+### Advanced Optimizations
+- **Market Impact Calculator** - Calculates REAL cost across order book depth (prevents buying at effective price > $1.00)
+- **Cooldown Manager** - Prevents spam trading with per-market cooldown
+- **Execution Lock** - Prevents duplicate execution on same market
+- **Slippage Protection** - Verifies prices haven't moved before execution
+- **Opportunity Cache** - Ranks opportunities by ROI
+
+### Resilience
+- **Auto-Reconnection** - WebSocket reconnects with exponential backoff (5s → 60s)
+- **Market Quality Scoring** - Prioritizes markets by volume, liquidity, spread, time
+
+### User Interface
+- **PnL Dashboard** - Real-time balance, daily/total P&L, win rate, ROI
+- **Trade History** - Historical trades table with CSV export
+- **Live Market Feed** - Shows arbitrage opportunities in real-time
+- **System Logs** - Real-time logs in console
 - **Modern Dark UI** - Professional Qt-based interface
-- **Live Logging** - Real-time logs in console and file
-- **Configurable Parameters** - Capital, margin, volume thresholds
 
 ## Screenshots
 
 The application features a modern dark-themed interface with:
-- Live market feed showing arbitrage opportunities
-- Real-time system logs
-- Configuration panel for API credentials and trading parameters
+- **Performance Dashboard** - Balance, P&L (today/total), win rate, avg ROI, trade count
+- **Tabbed View** - Live Market Feed + Trade History with CSV export
+- **System Logs** - Real-time logging
+- **Configuration Panel** - API credentials and trading parameters
 
 ## Installation
 
@@ -97,15 +114,18 @@ arbitrage-poly/
 ├── run.sh                 # Linux/macOS launcher
 │
 ├── backend/               # Core trading logic
-│   ├── arbitrage.py      # Main bot engine
+│   ├── arbitrage.py      # Main bot engine + optimizations
+│   │                     # (MarketImpactCalculator, CooldownManager,
+│   │                     #  ExecutionLock, OpportunityManager)
 │   ├── config.py         # Configuration management
 │   ├── logger.py         # Logging setup
 │   ├── services/         # Modular services
 │   │   ├── market_service.py
 │   │   ├── websocket_service.py
-│   │   └── order_service.py
+│   │   ├── order_service.py
+│   │   └── market_scorer.py   # Market quality scoring
 │   └── models/           # Data models
-│       ├── order_book.py
+│       ├── order_book.py      # Optimized with SortedDict
 │       └── trade.py
 │
 ├── frontend/              # User interface
@@ -113,7 +133,18 @@ arbitrage-poly/
 │   ├── styles.py         # Dark theme styling
 │   └── components/
 │       ├── config_widget.py    # Configuration form
-│       └── market_monitor.py   # Live market table
+│       ├── market_monitor.py   # Live market table
+│       ├── pnl_dashboard.py    # P&L performance dashboard
+│       └── trade_history.py    # Trade history + CSV export
+│
+├── tests/                 # Unit tests (86 tests)
+│   ├── test_market_impact.py
+│   ├── test_market_scorer.py
+│   ├── test_slippage.py
+│   ├── test_cooldown.py
+│   ├── test_execution_lock.py
+│   ├── test_opportunity.py
+│   └── test_order_book.py
 │
 └── logs/                  # Trading logs
     └── bot.log
@@ -122,11 +153,23 @@ arbitrage-poly/
 ## How It Works
 
 1. **Market Fetching** - Retrieves active binary markets filtered by volume
-2. **WebSocket Connection** - Subscribes to level 2 order book updates
-3. **Price Monitoring** - Tracks best ask prices for YES and NO tokens
-4. **Arbitrage Detection** - Triggers when `YES_price + NO_price < 1.0 - margin`
-5. **Trade Execution** - Places parallel FOK orders for both outcomes
-6. **Position Tracking** - Logs executed trades and monitors positions
+2. **Quality Scoring** - Ranks markets by volume, liquidity, spread, time-to-resolution
+3. **WebSocket Connection** - Subscribes to level 2 order book updates (auto-reconnects)
+4. **Depth-Aware Analysis** - Calculates REAL cost across multiple price levels (not just top-of-book)
+5. **Optimal Size Calculation** - Binary search finds max profitable shares before market impact kills ROI
+6. **Slippage Check** - Verifies prices haven't moved before execution
+7. **Trade Execution** - Places parallel FOK orders for both outcomes
+8. **Position Tracking** - Logs executed trades, updates PnL dashboard
+
+### Why Market Impact Matters
+
+```
+Naive approach:     YES=0.45, NO=0.50 → Cost=0.95 → "5% profit!"
+Reality at 50 shares: Consumes multiple levels → Effective cost=1.02 → LOSS!
+
+The MarketImpactCalculator prevents this by calculating weighted average
+prices across order book depth before trading.
+```
 
 ## Risk Warning
 
@@ -146,6 +189,19 @@ arbitrage-poly/
 - `websockets` - WebSocket connections
 - `aiohttp` - Async HTTP requests
 - `python-dotenv` - Environment variable management
+- `sortedcontainers` - Optimized order book data structures
+
+### Development
+- `pytest` - Testing framework
+- `pytest-asyncio` - Async test support
+
+## Running Tests
+
+```bash
+python3.11 -m pytest tests/ -v
+```
+
+86 tests covering market impact, slippage, cooldown, execution lock, opportunity cache, order book, and market scoring.
 
 ## License
 
