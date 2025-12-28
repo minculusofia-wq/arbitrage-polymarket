@@ -32,6 +32,11 @@ class Config:
     MAX_TOKENS_MONITOR: int = 20
     FALLBACK_BALANCE: float = 1000.0
 
+    # Optimization parameters
+    COOLDOWN_SECONDS: float = 30.0  # Cooldown between trades on same market
+    MAX_SLIPPAGE: float = 0.005     # Maximum acceptable slippage (0.5%)
+    OPPORTUNITY_CACHE_TTL: float = 60.0  # Opportunity cache expiration
+
     @classmethod
     def load(cls):
         """
@@ -79,6 +84,11 @@ class Config:
             max_tokens = int(os.getenv("MAX_TOKENS_MONITOR", "20"))
             fallback_balance = float(os.getenv("FALLBACK_BALANCE", "1000.0"))
 
+            # Optimization parameters
+            cooldown_seconds = float(os.getenv("COOLDOWN_SECONDS", "30.0"))
+            max_slippage = float(os.getenv("MAX_SLIPPAGE", "0.005"))
+            opportunity_cache_ttl = float(os.getenv("OPPORTUNITY_CACHE_TTL", "60.0"))
+
             return cls(
                 POLY_API_KEY=api_key,
                 POLY_API_SECRET=api_secret,
@@ -93,6 +103,10 @@ class Config:
                 CLOB_WS_URL=ws_url,
                 MAX_TOKENS_MONITOR=max_tokens,
                 FALLBACK_BALANCE=fallback_balance,
+                # Optimization parameters
+                COOLDOWN_SECONDS=cooldown_seconds,
+                MAX_SLIPPAGE=max_slippage,
+                OPPORTUNITY_CACHE_TTL=opportunity_cache_ttl,
             )
         except Exception as e:
             # Re-raise to be handled by caller (UI or Main)

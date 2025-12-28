@@ -1,7 +1,8 @@
 import asyncio
 import json
 import time
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Set
 import websockets
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
@@ -13,6 +14,150 @@ from backend.logger import logger
 # Constants
 MAX_EXECUTION_WINDOW = 20  # seconds
 
+
+# ============================================
+# OPTIMIZATION 1: Cooldown Manager
+# ============================================
+class CooldownManager:
+    """
+    Prevents spam trading by enforcing a cooldown period per market.
+    """
+    def __init__(self, cooldown_seconds: float = 30.0):
+        self.last_trade: Dict[str, float] = {}
+        self.cooldown = cooldown_seconds
+
+    def can_trade(self, market_id: str) -> bool:
+        """Check if enough time has passed since last trade on this market."""
+        last = self.last_trade.get(market_id, 0)
+        return time.time() - last > self.cooldown
+
+    def record_trade(self, market_id: str):
+        """Record a trade timestamp for cooldown tracking."""
+        self.last_trade[market_id] = time.time()
+
+    def time_remaining(self, market_id: str) -> float:
+        """Returns seconds remaining in cooldown, 0 if can trade."""
+        last = self.last_trade.get(market_id, 0)
+        remaining = self.cooldown - (time.time() - last)
+        return max(0, remaining)
+
+
+# ============================================
+# OPTIMIZATION 2: Execution Lock
+# ============================================
+class ExecutionLock:
+    """
+    Prevents duplicate execution on the same market.
+    Thread-safe async lock.
+    """
+    def __init__(self):
+        self.executing: Set[str] = set()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, market_id: str) -> bool:
+        """Try to acquire lock for a market. Returns False if already executing."""
+        async with self._lock:
+            if market_id in self.executing:
+                return False
+            self.executing.add(market_id)
+            return True
+
+    async def release(self, market_id: str):
+        """Release the lock for a market."""
+        async with self._lock:
+            self.executing.discard(market_id)
+
+    def is_executing(self, market_id: str) -> bool:
+        """Check if a market is currently being executed."""
+        return market_id in self.executing
+
+
+# ============================================
+# OPTIMIZATION 3: Opportunity Cache
+# ============================================
+@dataclass
+class OpportunityCache:
+    """Cached arbitrage opportunity with metadata."""
+    market_id: str
+    yes_token: str
+    no_token: str
+    yes_price: float
+    no_price: float
+    cost: float
+    roi: float
+    timestamp: float
+    executed: bool = False
+
+
+class OpportunityManager:
+    """
+    Manages and caches arbitrage opportunities.
+    Enables profitability ranking and deduplication.
+    """
+    def __init__(self, min_profit_margin: float):
+        self.opportunities: Dict[str, OpportunityCache] = {}
+        self.min_margin = min_profit_margin
+
+    def update(self, market_id: str, yes_token: str, no_token: str,
+               yes_price: float, no_price: float) -> Optional[OpportunityCache]:
+        """Update opportunity cache. Returns opportunity if profitable."""
+        cost = yes_price + no_price
+        target = 1.0 - self.min_margin
+
+        if cost < target and cost > 0:
+            roi = (1.0 - cost) / cost * 100
+            opp = OpportunityCache(
+                market_id=market_id,
+                yes_token=yes_token,
+                no_token=no_token,
+                yes_price=yes_price,
+                no_price=no_price,
+                cost=cost,
+                roi=roi,
+                timestamp=time.time()
+            )
+            self.opportunities[market_id] = opp
+            return opp
+
+        # Remove if no longer profitable
+        self.opportunities.pop(market_id, None)
+        return None
+
+    def get_best(self, n: int = 5) -> List[OpportunityCache]:
+        """Returns the N best opportunities sorted by ROI (descending)."""
+        valid = [o for o in self.opportunities.values() if not o.executed]
+        return sorted(valid, key=lambda x: x.roi, reverse=True)[:n]
+
+    def mark_executed(self, market_id: str):
+        """Mark an opportunity as executed."""
+        if market_id in self.opportunities:
+            self.opportunities[market_id].executed = True
+
+    def get(self, market_id: str) -> Optional[OpportunityCache]:
+        """Get a specific opportunity."""
+        return self.opportunities.get(market_id)
+
+    def clear_stale(self, max_age: float = 60.0):
+        """Remove opportunities older than max_age seconds."""
+        now = time.time()
+        stale = [k for k, v in self.opportunities.items() if now - v.timestamp > max_age]
+        for k in stale:
+            del self.opportunities[k]
+
+
+# ============================================
+# SLIPPAGE CHECK UTILITY
+# ============================================
+def check_slippage(expected_cost: float, current_cost: float, max_slippage: float = 0.005) -> bool:
+    """
+    Check if slippage is within acceptable range.
+    Returns True if slippage is acceptable, False otherwise.
+    """
+    if expected_cost <= 0:
+        return False
+    slippage = abs(current_cost - expected_cost) / expected_cost
+    return slippage <= max_slippage
+
 class ArbitrageBot:
     def __init__(self, config: Config):
         self.config = config
@@ -23,6 +168,13 @@ class ArbitrageBot:
         self.token_to_market: Dict[str, str] = {} # token_id -> market_id (for fast O(1) lookup)
         self.markets_whitelist: List[str] = [] # condition_ids or token_ids
         self.on_opportunity = None # Callback function(market_id, yes_price, no_price)
+
+        # ============================================
+        # OPTIMIZATION MANAGERS
+        # ============================================
+        self.cooldown_manager = CooldownManager(config.COOLDOWN_SECONDS)
+        self.execution_lock = ExecutionLock()
+        self.opportunity_manager = OpportunityManager(config.MIN_PROFIT_MARGIN)
         
         # Initialize Clob Client (Synchronous)
         # We will run blocking calls in executor
@@ -185,6 +337,7 @@ class ArbitrageBot:
     async def check_arbitrage(self, token_id: str):
         """
         Checks if YES + NO < 1 - Margin
+        Uses optimization managers for cooldown, locking, and caching.
         """
         # Fast O(1) lookup using token_to_market index
         market_id = self.token_to_market.get(token_id)
@@ -199,87 +352,136 @@ class ArbitrageBot:
         no_token = m['tokens'][1]['token_id']
 
         # Get best asks
-        # We Buy at Ask.
-        # Arb: Buy Yes @ Ask1 + Buy No @ Ask2 < 1
-        
         ask_yes_list = self.order_books.get(yes_token, {}).get('asks', [])
         ask_no_list = self.order_books.get(no_token, {}).get('asks', [])
-        
+
         if not ask_yes_list or not ask_no_list:
             return
 
-        # Best Ask is usually the first one data[0] if sorted, assuming sorted explicitly
-        # Clob usually sends sorted. price matches logic? 
-        # Price is strictly 0.0-1.0? Clob sends string "0.54" etc
-        
         best_ask_yes = float(ask_yes_list[0]['price'])
         best_ask_no = float(ask_no_list[0]['price'])
-        
-        cost = best_ask_yes + best_ask_no
-        target = 1.0 - self.config.MIN_PROFIT_MARGIN
-        
-        if cost < target:
-            logger.info(f"ARBITRAGE FOUND! {market_id} | YES: {best_ask_yes} + NO: {best_ask_no} = {cost} (Target < {target})")
-            
-            if self.on_opportunity:
-                # Run safe, don't block
-                try:
-                    self.on_opportunity(market_id, best_ask_yes, best_ask_no)
-                except Exception as e:
-                    logger.error(f"UI Callback Error: {e}")
 
-            # Trigger Execution
-            await self.execute_trade(market_id, yes_token, no_token, best_ask_yes, best_ask_no)
+        # Update opportunity cache (handles profitability check internally)
+        opportunity = self.opportunity_manager.update(
+            market_id, yes_token, no_token, best_ask_yes, best_ask_no
+        )
 
-    async def execute_trade(self, market_id, yes_token, no_token, price_yes, price_no):
-        """
-        Executes the dual buy order
-        """
-        start_time = time.time()
-        logger.info(f"Executing Trade for {market_id}")
-        
-        # Calculate size
-        # Total Capital / Cost = Shares
-        # Example: $10 / 0.95 = 10.52 shares
-        capital = self.config.CAPITAL_PER_TRADE
-        cost = price_yes + price_no
-        shares = capital / cost
-        
-        # Rounding?
-        shares = round(shares, 2) # simplified
-        
-        if shares <= 0:
+        if not opportunity:
+            return  # Not profitable
+
+        logger.info(f"ARBITRAGE FOUND! {market_id} | YES: {best_ask_yes} + NO: {best_ask_no} = {opportunity.cost:.4f} | ROI: {opportunity.roi:.2f}%")
+
+        # Notify UI
+        if self.on_opportunity:
+            try:
+                self.on_opportunity(market_id, best_ask_yes, best_ask_no)
+            except Exception as e:
+                logger.error(f"UI Callback Error: {e}")
+
+        # OPTIMIZATION: Check cooldown before execution
+        if not self.cooldown_manager.can_trade(market_id):
+            remaining = self.cooldown_manager.time_remaining(market_id)
+            logger.debug(f"Market {market_id} in cooldown ({remaining:.1f}s remaining)")
             return
 
-        # 20s Window Constraint
-        if time.time() - start_time > MAX_EXECUTION_WINDOW:
-            logger.error("Execution window exceeded. Aborting.")
+        # OPTIMIZATION: Check if already executing
+        if self.execution_lock.is_executing(market_id):
+            logger.debug(f"Market {market_id} already executing")
             return
 
-        # Place Orders
-        logger.info(f"Buying {shares} shares of YES and NO.")
-        
-        loop = asyncio.get_running_loop()
-        
-        # Make orders (Parallel?)
-        # We run them slightly sequentially or gathered to ensure we don't end up with one leg
-        # Ideally: atomic? Not possible on Clob easily without batching support.
-        # We try to fill both.
-        
-        # Order 1: YES
-        t1 = loop.run_in_executor(None, lambda: self._place_order(yes_token, shares, price_yes))
-        # Order 2: NO
-        t2 = loop.run_in_executor(None, lambda: self._place_order(no_token, shares, price_no))
-        
-        results = await asyncio.gather(t1, t2, return_exceptions=True)
-        
-        success = all(not isinstance(r, Exception) and r is not None for r in results)
-        if success:
-            logger.info("Trade Executed Successfully.")
-            self.positions.append({"market": market_id, "size": shares, "entry": cost, "time": time.time()})
-        else:
-            logger.error(f"Trade Partial Failure or Error: {results}")
-            logger.critical(f"PARTIAL FILL RISK for {market_id}: One or both orders may have failed. Check positions manually!")
+        # Execute with slippage protection
+        await self.execute_with_slippage_check(
+            market_id, yes_token, no_token, best_ask_yes, best_ask_no
+        )
+
+    async def execute_with_slippage_check(self, market_id: str, yes_token: str, no_token: str,
+                                           expected_yes: float, expected_no: float) -> bool:
+        """
+        Execute trade with slippage protection.
+        Verifies current prices haven't moved significantly before executing.
+        """
+        # Get current prices from order books
+        ask_yes_list = self.order_books.get(yes_token, {}).get('asks', [])
+        ask_no_list = self.order_books.get(no_token, {}).get('asks', [])
+
+        if not ask_yes_list or not ask_no_list:
+            logger.warning(f"Order books empty for {market_id}")
+            return False
+
+        current_yes = float(ask_yes_list[0].get('price', 0))
+        current_no = float(ask_no_list[0].get('price', 0))
+
+        expected_cost = expected_yes + expected_no
+        current_cost = current_yes + current_no
+
+        if current_cost <= 0:
+            logger.warning(f"Invalid current cost for {market_id}")
+            return False
+
+        # Check slippage
+        if not check_slippage(expected_cost, current_cost, self.config.MAX_SLIPPAGE):
+            slippage = abs(current_cost - expected_cost) / expected_cost * 100
+            logger.warning(f"Slippage too high for {market_id}: {slippage:.2f}% > {self.config.MAX_SLIPPAGE * 100}%")
+            return False
+
+        # Execute with current prices (more accurate)
+        return await self.execute_trade(market_id, yes_token, no_token, current_yes, current_no)
+
+    async def execute_trade(self, market_id, yes_token, no_token, price_yes, price_no) -> bool:
+        """
+        Executes the dual buy order with execution lock.
+        Returns True if successful, False otherwise.
+        """
+        # OPTIMIZATION: Acquire execution lock
+        if not await self.execution_lock.acquire(market_id):
+            logger.warning(f"Could not acquire lock for {market_id}")
+            return False
+
+        try:
+            start_time = time.time()
+            logger.info(f"Executing Trade for {market_id}")
+
+            # Calculate size
+            capital = self.config.CAPITAL_PER_TRADE
+            cost = price_yes + price_no
+            shares = capital / cost
+            shares = round(shares, 2)
+
+            if shares <= 0:
+                return False
+
+            # 20s Window Constraint
+            if time.time() - start_time > MAX_EXECUTION_WINDOW:
+                logger.error("Execution window exceeded. Aborting.")
+                return False
+
+            logger.info(f"Buying {shares} shares of YES and NO.")
+
+            loop = asyncio.get_running_loop()
+
+            # Execute both orders in parallel
+            t1 = loop.run_in_executor(None, lambda: self._place_order(yes_token, shares, price_yes))
+            t2 = loop.run_in_executor(None, lambda: self._place_order(no_token, shares, price_no))
+
+            results = await asyncio.gather(t1, t2, return_exceptions=True)
+
+            success = all(not isinstance(r, Exception) and r is not None for r in results)
+            if success:
+                logger.info("Trade Executed Successfully.")
+                self.positions.append({"market": market_id, "size": shares, "entry": cost, "time": time.time()})
+
+                # OPTIMIZATION: Record trade for cooldown and mark opportunity as executed
+                self.cooldown_manager.record_trade(market_id)
+                self.opportunity_manager.mark_executed(market_id)
+                return True
+            else:
+                logger.error(f"Trade Partial Failure or Error: {results}")
+                logger.critical(f"PARTIAL FILL RISK for {market_id}: One or both orders may have failed. Check positions manually!")
+                return False
+
+        finally:
+            # OPTIMIZATION: Always release lock
+            await self.execution_lock.release(market_id)
 
     def _place_order(self, token_id, amount, price):
         if self.client is None:

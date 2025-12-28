@@ -6,3 +6,5 @@ qasync
 aiohttp
 websockets
 py-clob-client
+sortedcontainers
+pytest
