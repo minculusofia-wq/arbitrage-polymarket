@@ -2,7 +2,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 import websockets
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType
@@ -157,6 +157,172 @@ def check_slippage(expected_cost: float, current_cost: float, max_slippage: floa
         return False
     slippage = abs(current_cost - expected_cost) / expected_cost
     return slippage <= max_slippage
+
+
+# ============================================
+# MARKET IMPACT CALCULATOR (CRITICAL)
+# ============================================
+@dataclass
+class MarketImpactResult:
+    """Result of market impact calculation."""
+    shares: float
+    effective_price: float  # Average price per share
+    total_cost: float
+    levels_consumed: int
+    has_sufficient_liquidity: bool
+
+
+class MarketImpactCalculator:
+    """
+    Calculates the real cost of executing orders across order book depth.
+    Prevents buying at effective price > $1.00.
+
+    This is CRITICAL for profitability - without this, the bot will
+    see "YES=0.45, NO=0.50" but actually pay much more when buying
+    large quantities that consume multiple price levels.
+    """
+
+    @staticmethod
+    def calculate_effective_cost(order_book: List[dict], shares_needed: float) -> MarketImpactResult:
+        """
+        Calculate the average price to buy X shares across multiple price levels.
+
+        Args:
+            order_book: List of {price, size} sorted by price ascending (asks)
+            shares_needed: Number of shares to buy
+
+        Returns:
+            MarketImpactResult with effective price and liquidity info
+        """
+        if not order_book or shares_needed <= 0:
+            return MarketImpactResult(0, 0, 0, 0, False)
+
+        total_cost = 0.0
+        shares_filled = 0.0
+        levels_consumed = 0
+
+        for level in order_book:
+            price = float(level['price'])
+            size = float(level.get('size', 0))
+
+            if size <= 0:
+                continue
+
+            shares_to_take = min(shares_needed - shares_filled, size)
+            total_cost += shares_to_take * price
+            shares_filled += shares_to_take
+            levels_consumed += 1
+
+            if shares_filled >= shares_needed:
+                break
+
+        if shares_filled < shares_needed:
+            return MarketImpactResult(
+                shares=shares_filled,
+                effective_price=total_cost / shares_filled if shares_filled > 0 else 0,
+                total_cost=total_cost,
+                levels_consumed=levels_consumed,
+                has_sufficient_liquidity=False
+            )
+
+        return MarketImpactResult(
+            shares=shares_needed,
+            effective_price=total_cost / shares_needed,
+            total_cost=total_cost,
+            levels_consumed=levels_consumed,
+            has_sufficient_liquidity=True
+        )
+
+    @staticmethod
+    def find_optimal_trade_size(
+        yes_book: List[dict],
+        no_book: List[dict],
+        max_combined_cost: float = 0.98,
+        max_shares: float = 1000,
+        precision: float = 0.1
+    ) -> Tuple[float, float, float]:
+        """
+        Binary search to find maximum shares where effective_yes + effective_no < max_cost.
+
+        Args:
+            yes_book: YES token order book (asks)
+            no_book: NO token order book (asks)
+            max_combined_cost: Maximum acceptable combined cost (default 0.98)
+            max_shares: Maximum shares to consider
+            precision: Search precision in shares
+
+        Returns:
+            Tuple of (optimal_shares, effective_yes_price, effective_no_price)
+            Returns (0, 0, 0) if no profitable size exists
+        """
+        low, high = 0.0, max_shares
+        best_shares = 0.0
+        best_yes_price = 0.0
+        best_no_price = 0.0
+
+        # First check if even 1 share is profitable
+        yes_result = MarketImpactCalculator.calculate_effective_cost(yes_book, 1.0)
+        no_result = MarketImpactCalculator.calculate_effective_cost(no_book, 1.0)
+
+        if not yes_result.has_sufficient_liquidity or not no_result.has_sufficient_liquidity:
+            return 0.0, 0.0, 0.0
+
+        if yes_result.effective_price + no_result.effective_price >= max_combined_cost:
+            return 0.0, 0.0, 0.0  # Not profitable at any size
+
+        # Binary search for optimal size
+        iterations = 0
+        max_iterations = 50  # Prevent infinite loop
+
+        while high - low > precision and iterations < max_iterations:
+            iterations += 1
+            mid = (low + high) / 2
+
+            yes_result = MarketImpactCalculator.calculate_effective_cost(yes_book, mid)
+            no_result = MarketImpactCalculator.calculate_effective_cost(no_book, mid)
+
+            if not yes_result.has_sufficient_liquidity or not no_result.has_sufficient_liquidity:
+                high = mid
+                continue
+
+            combined_cost = yes_result.effective_price + no_result.effective_price
+
+            if combined_cost < max_combined_cost:
+                best_shares = mid
+                best_yes_price = yes_result.effective_price
+                best_no_price = no_result.effective_price
+                low = mid
+            else:
+                high = mid
+
+        return best_shares, best_yes_price, best_no_price
+
+    @staticmethod
+    def get_max_profitable_investment(
+        yes_book: List[dict],
+        no_book: List[dict],
+        target_margin: float = 0.02
+    ) -> Tuple[float, float]:
+        """
+        Calculate maximum USDC investment that remains profitable.
+
+        Returns:
+            Tuple of (max_usdc_investment, expected_profit_usdc)
+        """
+        max_cost = 1.0 - target_margin
+        shares, eff_yes, eff_no = MarketImpactCalculator.find_optimal_trade_size(
+            yes_book, no_book, max_combined_cost=max_cost
+        )
+
+        if shares <= 0:
+            return 0.0, 0.0
+
+        effective_cost = eff_yes + eff_no
+        investment = shares * effective_cost
+        profit = shares * (1.0 - effective_cost)
+
+        return investment, profit
+
 
 class ArbitrageBot:
     def __init__(self, config: Config):
@@ -336,8 +502,13 @@ class ArbitrageBot:
 
     async def check_arbitrage(self, token_id: str):
         """
-        Checks if YES + NO < 1 - Margin
-        Uses optimization managers for cooldown, locking, and caching.
+        DEPTH-AWARE arbitrage detection.
+        Calculates the REAL cost of buying across order book levels,
+        not just the top-of-book price.
+
+        This is CRITICAL: Without depth analysis, the bot will see
+        "YES=0.45 + NO=0.50 = 0.95" but actually pay ~1.02 when buying
+        large quantities that consume multiple price levels.
         """
         # Fast O(1) lookup using token_to_market index
         market_id = self.token_to_market.get(token_id)
@@ -351,30 +522,56 @@ class ArbitrageBot:
         yes_token = m['tokens'][0]['token_id']
         no_token = m['tokens'][1]['token_id']
 
-        # Get best asks
+        # Get order book depth (not just best price)
         ask_yes_list = self.order_books.get(yes_token, {}).get('asks', [])
         ask_no_list = self.order_books.get(no_token, {}).get('asks', [])
 
         if not ask_yes_list or not ask_no_list:
             return
 
-        best_ask_yes = float(ask_yes_list[0]['price'])
-        best_ask_no = float(ask_no_list[0]['price'])
+        # CRITICAL: Calculate optimal size based on order book DEPTH
+        target_cost = 1.0 - self.config.MIN_PROFIT_MARGIN
 
-        # Update opportunity cache (handles profitability check internally)
-        opportunity = self.opportunity_manager.update(
-            market_id, yes_token, no_token, best_ask_yes, best_ask_no
+        # Calculate max shares we might want based on capital
+        max_possible_shares = self.config.CAPITAL_PER_TRADE / 0.5  # Rough estimate
+
+        optimal_shares, eff_yes, eff_no = MarketImpactCalculator.find_optimal_trade_size(
+            ask_yes_list,
+            ask_no_list,
+            max_combined_cost=target_cost,
+            max_shares=max_possible_shares,
+            precision=1.0
         )
 
-        if not opportunity:
-            return  # Not profitable
+        if optimal_shares <= 0:
+            return  # No profitable opportunity at any size
 
-        logger.info(f"ARBITRAGE FOUND! {market_id} | YES: {best_ask_yes} + NO: {best_ask_no} = {opportunity.cost:.4f} | ROI: {opportunity.roi:.2f}%")
+        effective_cost = eff_yes + eff_no
 
-        # Notify UI
+        if effective_cost >= target_cost:
+            return  # Not profitable after market impact
+
+        roi = (1.0 - effective_cost) / effective_cost * 100
+
+        # Update opportunity cache with EFFECTIVE prices (not top-of-book)
+        opportunity = self.opportunity_manager.update(
+            market_id, yes_token, no_token, eff_yes, eff_no
+        )
+
+        # Log with depth-aware info
+        top_yes = float(ask_yes_list[0]['price'])
+        top_no = float(ask_no_list[0]['price'])
+        logger.info(
+            f"DEPTH-AWARE ARB: {market_id} | "
+            f"Top: {top_yes:.3f}+{top_no:.3f}={top_yes+top_no:.3f} | "
+            f"Effective: {eff_yes:.4f}+{eff_no:.4f}={effective_cost:.4f} | "
+            f"Shares: {optimal_shares:.1f} | ROI: {roi:.2f}%"
+        )
+
+        # Notify UI with effective prices
         if self.on_opportunity:
             try:
-                self.on_opportunity(market_id, best_ask_yes, best_ask_no)
+                self.on_opportunity(market_id, eff_yes, eff_no)
             except Exception as e:
                 logger.error(f"UI Callback Error: {e}")
 
@@ -389,9 +586,9 @@ class ArbitrageBot:
             logger.debug(f"Market {market_id} already executing")
             return
 
-        # Execute with slippage protection
-        await self.execute_with_slippage_check(
-            market_id, yes_token, no_token, best_ask_yes, best_ask_no
+        # Execute with depth-aware parameters
+        await self.execute_depth_aware_trade(
+            market_id, yes_token, no_token, optimal_shares, eff_yes, eff_no
         )
 
     async def execute_with_slippage_check(self, market_id: str, yes_token: str, no_token: str,
@@ -426,6 +623,109 @@ class ArbitrageBot:
 
         # Execute with current prices (more accurate)
         return await self.execute_trade(market_id, yes_token, no_token, current_yes, current_no)
+
+    async def execute_depth_aware_trade(
+        self, market_id: str, yes_token: str, no_token: str,
+        shares: float, price_yes: float, price_no: float
+    ) -> bool:
+        """
+        Execute trade with pre-calculated optimal size from depth analysis.
+
+        Unlike execute_trade which calculates shares from capital/cost,
+        this method uses the pre-calculated optimal shares from
+        MarketImpactCalculator.find_optimal_trade_size().
+
+        Args:
+            market_id: Market identifier
+            yes_token: YES token ID
+            no_token: NO token ID
+            shares: Pre-calculated optimal number of shares
+            price_yes: Effective YES price (weighted average across levels)
+            price_no: Effective NO price (weighted average across levels)
+
+        Returns:
+            True if trade executed successfully, False otherwise
+        """
+        if not await self.execution_lock.acquire(market_id):
+            logger.warning(f"Could not acquire lock for {market_id}")
+            return False
+
+        try:
+            start_time = time.time()
+
+            # Re-verify liquidity before execution
+            ask_yes = self.order_books.get(yes_token, {}).get('asks', [])
+            ask_no = self.order_books.get(no_token, {}).get('asks', [])
+
+            yes_result = MarketImpactCalculator.calculate_effective_cost(ask_yes, shares)
+            no_result = MarketImpactCalculator.calculate_effective_cost(ask_no, shares)
+
+            if not yes_result.has_sufficient_liquidity or not no_result.has_sufficient_liquidity:
+                logger.warning(f"Liquidity disappeared for {market_id}")
+                return False
+
+            current_cost = yes_result.effective_price + no_result.effective_price
+            target_cost = 1.0 - self.config.MIN_PROFIT_MARGIN
+
+            if current_cost >= target_cost:
+                logger.warning(f"No longer profitable after re-check: {current_cost:.4f} >= {target_cost:.4f}")
+                return False
+
+            # Check execution window
+            if time.time() - start_time > MAX_EXECUTION_WINDOW:
+                logger.error("Execution window exceeded. Aborting.")
+                return False
+
+            logger.info(
+                f"EXECUTING: {market_id} | {shares:.2f} shares | "
+                f"YES@{yes_result.effective_price:.4f} (L{yes_result.levels_consumed}) + "
+                f"NO@{no_result.effective_price:.4f} (L{no_result.levels_consumed}) = "
+                f"{current_cost:.4f}"
+            )
+
+            loop = asyncio.get_running_loop()
+
+            # Execute both orders in parallel with effective prices
+            t1 = loop.run_in_executor(
+                None,
+                lambda: self._place_order(yes_token, shares, yes_result.effective_price)
+            )
+            t2 = loop.run_in_executor(
+                None,
+                lambda: self._place_order(no_token, shares, no_result.effective_price)
+            )
+
+            results = await asyncio.gather(t1, t2, return_exceptions=True)
+
+            success = all(not isinstance(r, Exception) and r is not None for r in results)
+
+            if success:
+                profit = shares * (1.0 - current_cost)
+                logger.info(f"Trade Executed Successfully. Expected profit: ${profit:.2f}")
+                self.positions.append({
+                    "market": market_id,
+                    "size": shares,
+                    "entry": current_cost,
+                    "effective_yes": yes_result.effective_price,
+                    "effective_no": no_result.effective_price,
+                    "levels_yes": yes_result.levels_consumed,
+                    "levels_no": no_result.levels_consumed,
+                    "time": time.time()
+                })
+
+                self.cooldown_manager.record_trade(market_id)
+                self.opportunity_manager.mark_executed(market_id)
+                return True
+            else:
+                logger.error(f"Trade Partial Failure or Error: {results}")
+                logger.critical(
+                    f"PARTIAL FILL RISK for {market_id}: "
+                    "One or both orders may have failed. Check positions manually!"
+                )
+                return False
+
+        finally:
+            await self.execution_lock.release(market_id)
 
     async def execute_trade(self, market_id, yes_token, no_token, price_yes, price_no) -> bool:
         """
