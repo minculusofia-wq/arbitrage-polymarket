@@ -2,6 +2,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple
 import websockets
 from py_clob_client.client import ClobClient
@@ -713,7 +714,6 @@ class ArbitrageBot:
                 entry_cost = shares * current_cost
                 logger.info(f"Trade Executed Successfully. Expected profit: ${profit:.2f}")
 
-                from datetime import datetime
                 trade_record = {
                     "market_id": market_id,
                     "side": "BOTH",

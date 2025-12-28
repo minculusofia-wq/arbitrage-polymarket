@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from typing import List, Dict, Optional
+from datetime import datetime, date
 
 
 class StatCard(QFrame):
@@ -113,20 +114,23 @@ class PnLDashboard(QFrame):
         # Total P&L
         total_pnl = sum(t.get('pnl', 0) for t in self.trades)
         pnl_color = "#00e676" if total_pnl >= 0 else "#ef4444"
-        sign = "+" if total_pnl >= 0 else ""
-        self.pnl_total_card.set_value(f"{sign}${total_pnl:,.2f}", pnl_color)
+        pnl_text = f"+${total_pnl:,.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):,.2f}"
+        self.pnl_total_card.set_value(pnl_text, pnl_color)
 
         # Today's P&L
-        from datetime import datetime, date
         today = date.today()
-        today_trades = [
-            t for t in self.trades
-            if t.get('timestamp', datetime.now()).date() == today
-        ]
+        today_trades = []
+        for t in self.trades:
+            ts = t.get('timestamp')
+            if isinstance(ts, datetime):
+                if ts.date() == today:
+                    today_trades.append(t)
+            # Skip trades without valid timestamp
+
         today_pnl = sum(t.get('pnl', 0) for t in today_trades)
         today_color = "#00e676" if today_pnl >= 0 else "#ef4444"
-        today_sign = "+" if today_pnl >= 0 else ""
-        self.pnl_today_card.set_value(f"{today_sign}${today_pnl:,.2f}", today_color)
+        today_text = f"+${today_pnl:,.2f}" if today_pnl >= 0 else f"-${abs(today_pnl):,.2f}"
+        self.pnl_today_card.set_value(today_text, today_color)
 
         # Win Rate
         if self.trades:
