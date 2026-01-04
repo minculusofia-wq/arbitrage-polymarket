@@ -29,6 +29,8 @@ from backend.clients.kalshi_client import KalshiClient
 from backend.services.rate_limiter import APIRateLimiter
 from backend.services.risk_manager import RiskManager
 from backend.services.capital_allocator import CapitalAllocator
+from backend.services.trade_storage import TradeStorage
+from backend.services.data_collector import DataCollector
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +92,8 @@ class MultiPlatformArbitrageBot:
         self.rate_limiter = APIRateLimiter()
         self.risk_manager = RiskManager.from_config(config)
         self.capital_allocator = CapitalAllocator(config.CAPITAL_PER_TRADE)
+        self.trade_storage = TradeStorage()
+        self.data_collector = DataCollector()
 
         # Callbacks for UI
         self.on_opportunity: Optional[callable] = None
@@ -293,6 +297,21 @@ class MultiPlatformArbitrageBot:
                     if self.on_opportunity:
                         self.on_opportunity(market.market_id, yes_ask, no_ask)
 
+                # PHASE 4: Capture snapshots for backtesting
+                if self.data_collector:
+                    self.data_collector.capture_snapshot(
+                        token_id=f"{market.market_id}:Yes",
+                        market_id=market.market_id,
+                        order_book={'asks': yes_ob.asks, 'bids': yes_ob.bids},
+                        platform=platform
+                    )
+                    self.data_collector.capture_snapshot(
+                        token_id=f"{market.market_id}:No",
+                        market_id=market.market_id,
+                        order_book={'asks': no_ob.asks, 'bids': no_ob.bids},
+                        platform=platform
+                    )
+
             except Exception as e:
                 logger.debug(f"Error checking {platform} market {market.market_id}: {e}")
 
@@ -334,6 +353,21 @@ class MultiPlatformArbitrageBot:
 
                 if not poly_yes or not kalshi_no:
                     continue
+
+                # PHASE 4: Capture snapshots
+                if self.data_collector:
+                    self.data_collector.capture_snapshot(
+                        token_id=f"{match.polymarket.market_id}:Yes",
+                        market_id=match.polymarket.market_id,
+                        order_book={'asks': poly_yes.asks, 'bids': poly_yes.bids},
+                        platform="polymarket"
+                    )
+                    self.data_collector.capture_snapshot(
+                        token_id=f"{match.kalshi.market_id}:No",
+                        market_id=match.kalshi.market_id,
+                        order_book={'asks': kalshi_no.asks, 'bids': kalshi_no.bids},
+                        platform="kalshi"
+                    )
 
                 poly_yes_ask = poly_yes.best_ask
                 kalshi_no_ask = kalshi_no.best_ask
@@ -380,6 +414,20 @@ class MultiPlatformArbitrageBot:
                 )
 
                 if kalshi_yes and poly_no:
+                    # PHASE 4: Capture snapshots
+                    if self.data_collector:
+                        self.data_collector.capture_snapshot(
+                            token_id=f"{match.kalshi.market_id}:Yes",
+                            market_id=match.kalshi.market_id,
+                            order_book={'asks': kalshi_yes.asks, 'bids': kalshi_yes.bids},
+                            platform="kalshi"
+                        )
+                        self.data_collector.capture_snapshot(
+                            token_id=f"{match.polymarket.market_id}:No",
+                            market_id=match.polymarket.market_id,
+                            order_book={'asks': poly_no.asks, 'bids': poly_no.bids},
+                            platform="polymarket"
+                        )
                     kalshi_yes_ask = kalshi_yes.best_ask
                     poly_no_ask = poly_no.best_ask
 
@@ -511,6 +559,9 @@ class MultiPlatformArbitrageBot:
             if self.on_trade:
                 self.on_trade(trade_info)
 
+            # Save to storage
+            self.trade_storage.save_trade(trade_info)
+
             logger.info(
                 f"Trade executed: {shares} shares @ {opportunity.total_cost:.3f} "
                 f"(Expected profit: ${shares * (1.0 - opportunity.total_cost):.2f})"
@@ -601,6 +652,9 @@ class MultiPlatformArbitrageBot:
             if self.on_trade:
                 self.on_trade(trade_info)
 
+            # Save to storage
+            self.trade_storage.save_trade(trade_info)
+
             logger.info(
                 f"Cross-platform trade executed: {shares} shares "
                 f"(Expected profit: ${shares * (1.0 - opportunity.total_cost):.2f})"
@@ -624,6 +678,11 @@ class MultiPlatformArbitrageBot:
 
         # Initial market fetch
         await self.fetch_all_markets()
+
+        # Start data collector
+        if self.data_collector:
+            await self.data_collector.start()
+            logger.info("Data Collector started")
 
         while self.running:
             try:
@@ -667,6 +726,10 @@ class MultiPlatformArbitrageBot:
                 logger.info(f"Disconnected from {platform}")
             except Exception as e:
                 logger.error(f"Error disconnecting from {platform}: {e}")
+
+        if self.data_collector:
+            await self.data_collector.stop()
+            logger.info("Data Collector stopped")
 
     def get_status(self) -> dict:
         """Get current bot status."""

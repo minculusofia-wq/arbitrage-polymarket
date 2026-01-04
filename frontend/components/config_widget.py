@@ -29,10 +29,6 @@ class ConfigWidget(QFrame):
         form_layout.setLabelAlignment(Qt.AlignLeft)
         
         fields = [
-            ("🔐 API Key", "POLY_API_KEY"),
-            ("🔐 API Secret", "POLY_API_SECRET"),
-            ("🔐 Passphrase", "POLY_API_PASSPHRASE"),
-            ("🔑 Private Key", "PRIVATE_KEY"),
             ("💰 Capital ($)", "CAPITAL_PER_TRADE"),
             ("📈 Min Margin", "MIN_PROFIT_MARGIN"),
             ("📊 Min Volume", "MIN_MARKET_VOLUME"),
@@ -40,8 +36,13 @@ class ConfigWidget(QFrame):
             ("🎯 Take Profit", "TAKE_PROFIT"),
         ]
 
-        # Keys that should be masked as passwords
-        secret_keys = {"POLY_API_KEY", "POLY_API_SECRET", "POLY_API_PASSPHRASE", "PRIVATE_KEY"}
+        # Credentials guidance
+        creds_info = QLabel("ℹ️ Set Platform Keys in the 'Credentials' tab")
+        creds_info.setStyleSheet("color: #fbbf24; font-size: 11px; margin-bottom: 5px; font-weight: bold;")
+        layout.addWidget(creds_info)
+
+        # Keys that should be masked as passwords (none left here)
+        secret_keys = set()
 
         for label_text, key in fields:
             lbl = QLabel(label_text)

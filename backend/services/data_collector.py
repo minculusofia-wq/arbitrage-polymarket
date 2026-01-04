@@ -229,13 +229,25 @@ class DataCollector:
 
         if asks:
             try:
-                best_ask = float(asks[0].get('price', asks[0]) if isinstance(asks[0], dict) else asks[0])
+                first_ask = asks[0]
+                if isinstance(first_ask, dict):
+                    best_ask = float(first_ask.get('price', first_ask))
+                elif isinstance(first_ask, (list, tuple)):
+                    best_ask = float(first_ask[0])
+                else:
+                    best_ask = float(first_ask)
             except (ValueError, TypeError, IndexError):
                 pass
 
         if bids:
             try:
-                best_bid = float(bids[0].get('price', bids[0]) if isinstance(bids[0], dict) else bids[0])
+                first_bid = bids[0]
+                if isinstance(first_bid, dict):
+                    best_bid = float(first_bid.get('price', first_bid))
+                elif isinstance(first_bid, (list, tuple)):
+                    best_bid = float(first_bid[0])
+                else:
+                    best_bid = float(first_bid)
             except (ValueError, TypeError, IndexError):
                 pass
 

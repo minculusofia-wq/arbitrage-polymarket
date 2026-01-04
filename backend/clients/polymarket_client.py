@@ -65,6 +65,27 @@ class PolymarketClient(IExchangeClient):
     async def connect(self) -> bool:
         """Connect and authenticate to Polymarket CLOB API."""
         try:
+            logger.info(f"Connecting to Polymarket (HOST={self.CLOB_HOST}, CHAIN_ID={self.CHAIN_ID})...")
+            
+            # Diagnostic: Inspect raw credential values before validation
+            import re
+            def debug_val(name, val):
+                if not val:
+                    logger.info(f"{name} is empty")
+                    return
+                # Show first/last chars and total length
+                safe_val = val[:2] + "..." + val[-2:] if len(val) > 4 else "..."
+                raw_repr = repr(val)
+                logger.info(f"{name}: len={len(val)}, safe='{safe_val}', repr={raw_repr}")
+                # Check for non-hex in PK
+                if name == "PK" and not re.match(r'^[0-9a-fA-F]*$', val):
+                    non_hex = set(re.sub(r'[0-9a-fA-F]', '', val))
+                    logger.error(f"PRIVATE KEY CONTAINS NON-HEX CHARACTERS: {non_hex}")
+                    # Log char codes of problematic characters
+                    for char in val:
+                        if not re.match(r'[0-9a-fA-F]', char):
+                            logger.error(f"  Invalid char found: '{char}' (code: {ord(char)})")
+
             # Validate credentials first
             is_valid, error = self.credentials.validate()
             if not is_valid:
@@ -72,14 +93,19 @@ class PolymarketClient(IExchangeClient):
                 return False
 
             kwargs = self.credentials.to_client_kwargs()
+            pk = kwargs.get("private_key", "")
+            
+            debug_val("API_KEY", kwargs.get("key"))
+            debug_val("PK", pk)
 
             # Initialize ClobClient
+            logger.info("Instantiating ClobClient...")
             self._client = ClobClient(
                 self.CLOB_HOST,
                 key=kwargs["key"],
                 chain_id=self.CHAIN_ID,
                 signature_type=1,  # L2 API Key
-                funder=kwargs["private_key"]
+                funder=pk
             )
 
             # Set API credentials for authenticated requests

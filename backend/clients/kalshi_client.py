@@ -22,6 +22,7 @@ from backend.interfaces.exchange_client import (
     OrderStatus
 )
 from backend.interfaces.credentials import KalshiCredentials
+from backend.utils.ssl_patch import get_ssl_context
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class KalshiClient(IExchangeClient):
     Uses the Kalshi Trading API v2 for market data and order execution.
     """
 
-    BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
+    BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
     DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2"
 
     def __init__(self, credentials: KalshiCredentials, use_demo: bool = False):
@@ -71,37 +72,58 @@ class KalshiClient(IExchangeClient):
                 logger.error(f"Invalid Kalshi credentials: {error}")
                 return False
 
-            # Create aiohttp session
-            self._session = aiohttp.ClientSession()
+            # Create aiohttp session with custom SSL context
+            connector = aiohttp.TCPConnector(ssl=get_ssl_context())
+            self._session = aiohttp.ClientSession(connector=connector)
 
             # Authenticate
-            auth_url = f"{self.base_url}/login"
             auth_data = {
                 "email": self.credentials.email,
                 "password": self.credentials.password
             }
 
-            async with self._session.post(auth_url, json=auth_data) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    self._token = data.get("token")
-                    self._member_id = data.get("member_id")
-                    self._connected = True
-                    logger.info("Kalshi client connected successfully")
-                    return True
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"Kalshi authentication failed: {resp.status} - {error_text}")
-                    return False
+            # Try to authenticate with multiple possible endpoints for the new API
+            login_endpoints = [
+                f"{self.base_url}/login",
+                "https://api.elections.kalshi.com/v2/login",
+                "https://api.elections.kalshi.com/trade-api/v2/log_in"
+            ]
+            
+            last_error = ""
+            for auth_url in login_endpoints:
+                try:
+                    logger.info(f"Attempting Kalshi login at {auth_url}...")
+                    async with self._session.post(auth_url, json=auth_data) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            self._token = data.get("token")
+                            self._member_id = data.get("member_id")
+                            self._connected = True
+                            logger.info(f"Kalshi client connected successfully via {auth_url}")
+                            return True
+                        elif resp.status == 404:
+                            logger.warning(f"Kalshi login at {auth_url} returned 404, trying next...")
+                            continue
+                        else:
+                            error_text = await resp.text()
+                            last_error = f"{resp.status} - {error_text}"
+                            logger.error(f"Kalshi authentication failed at {auth_url}: {last_error}")
+                except Exception as e:
+                    logger.error(f"Error during Kalshi login attempt at {auth_url}: {e}")
+                    last_error = str(e)
+
+            logger.error(f"Failed to connect to Kalshi after trying all endpoints. Last error: {last_error}")
+            await self.disconnect()
+            return False
 
         except Exception as e:
-            logger.error(f"Failed to connect to Kalshi: {e}")
-            self._connected = False
+            logger.error(f"Unexpected error connecting to Kalshi: {e}")
+            await self.disconnect()
             return False
 
     async def disconnect(self) -> None:
-        """Disconnect from Kalshi."""
-        if self._session:
+        """Disconnect from Kalshi and cleanup session."""
+        if self._session and not self._session.closed:
             await self._session.close()
         self._session = None
         self._token = None

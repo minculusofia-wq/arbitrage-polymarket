@@ -78,11 +78,9 @@ class PolymarketCredentialsTab(QFrame):
         return lbl
 
     def _on_enabled_changed(self, state):
-        enabled = state == Qt.Checked
-        self.api_key.setEnabled(enabled)
-        self.api_secret.setEnabled(enabled)
-        self.passphrase.setEnabled(enabled)
-        self.private_key.setEnabled(enabled)
+        # We keep fields enabled so user can always edit them.
+        # The checkbox status is used in get_credentials()
+        pass
 
     def load_from_env(self):
         """Load credentials from environment variables."""
@@ -146,20 +144,17 @@ class KalshiCredentialsTab(QFrame):
         # Email
         self.email = QLineEdit()
         self.email.setPlaceholderText("Enter Email")
-        self.email.setEnabled(False)
         form_layout.addRow(self._make_label("Email"), self.email)
 
         # Password
         self.password = QLineEdit()
         self.password.setPlaceholderText("Enter Password")
         self.password.setEchoMode(QLineEdit.Password)
-        self.password.setEnabled(False)
         form_layout.addRow(self._make_label("Password"), self.password)
 
         # API Key (optional)
         self.api_key = QLineEdit()
         self.api_key.setPlaceholderText("Optional - API Key")
-        self.api_key.setEnabled(False)
         form_layout.addRow(self._make_label("API Key (opt.)"), self.api_key)
 
         layout.addLayout(form_layout)
@@ -178,10 +173,9 @@ class KalshiCredentialsTab(QFrame):
         return lbl
 
     def _on_enabled_changed(self, state):
-        enabled = state == Qt.Checked
-        self.email.setEnabled(enabled)
-        self.password.setEnabled(enabled)
-        self.api_key.setEnabled(enabled)
+        # We keep fields enabled so user can always edit them.
+        # The checkbox status is used in get_credentials()
+        pass
 
     def load_from_env(self):
         """Load credentials from environment variables."""

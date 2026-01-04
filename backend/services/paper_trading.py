@@ -290,16 +290,17 @@ class PaperTradeExecutor(ITradeExecutor):
                 CREATE INDEX IF NOT EXISTS idx_paper_trades_market
                 ON paper_trades(market_id)
             """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_paper_trades_platform
-                ON paper_trades(platform)
-            """)
-
             # Migration: Add platform column if missing
             try:
                 conn.execute("ALTER TABLE paper_trades ADD COLUMN platform TEXT DEFAULT 'polymarket'")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+            # Index for platform (Must be after migration)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_paper_trades_platform
+                ON paper_trades(platform)
+            """)
 
     def _load_state(self):
         """Load previous state from database."""

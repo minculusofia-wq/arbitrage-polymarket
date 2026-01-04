@@ -67,17 +67,35 @@ class Config:
         """
         try:
             # Critical Credentials
-            # Critical Credentials - Aggressively remove all whitespace/hidden chars
-            api_key = os.getenv("POLY_API_KEY", "").strip().replace(" ", "")
-            api_secret = os.getenv("POLY_API_SECRET", "").strip().replace(" ", "")
-            passphrase = os.getenv("POLY_API_PASSPHRASE", "").strip().replace(" ", "")
-            private_key = os.getenv("PRIVATE_KEY", "").strip().replace(" ", "")
+            # Critical Credentials - Aggressively remove all whitespace/hidden chars/quotes
+            import re
+            def clean(val):
+                if not val: return ""
+                # Remove quotes if they exist at ends
+                val = val.strip().strip("'").strip('"')
+                # Remove all whitespace characters including tabs, newlines, non-breaking spaces
+                return re.sub(r'\s+', '', val)
+
+            api_key = clean(os.getenv("POLY_API_KEY", ""))
+            api_secret = clean(os.getenv("POLY_API_SECRET", ""))
+            passphrase = clean(os.getenv("POLY_API_PASSPHRASE", ""))
+            
+            # Ultra-strict hex cleaning for Private Key
+            raw_pk = os.getenv("PRIVATE_KEY", "")
+            private_key = re.sub(r'[^0-9a-fA-F]', '', re.sub(r'^0x', '', raw_pk.strip()))
 
             from backend.logger import logger
-            logger.info(f"Credential check - KEY len: {len(api_key)}, SECRET len: {len(api_secret)}, PASSPHRASE len: {len(passphrase)}, PK len: {len(private_key)}")
+            
+            def mask(s):
+                if not s or len(s) < 8: return "****"
+                return f"{s[:4]}...{s[-4:]}"
+
+            logger.info(f"Credential check - KEY: {mask(api_key)}, SECRET: {mask(api_secret)}, PASSPHRASE: {mask(passphrase)}")
+            logger.info(f"PRIVATE_KEY check - Len: {len(private_key)}, Masked: {mask(private_key)}")
 
             if private_key.startswith("0x"):
                 private_key = private_key[2:]
+                logger.info(f"Removed 0x prefix, new PK len: {len(private_key)}")
 
             # Check which platforms are enabled to validate credentials
             enabled_platforms_check = os.getenv("ENABLED_PLATFORMS", "polymarket")
@@ -89,8 +107,8 @@ class Config:
                 raise ValueError("Missing Polymarket API credentials in .env (required when Polymarket is enabled)")
 
             # Validate Kalshi credentials only if Kalshi is enabled
-            kalshi_email_check = os.getenv("KALSHI_EMAIL", "").strip()
-            kalshi_password_check = os.getenv("KALSHI_PASSWORD", "").strip()
+            kalshi_email_check = clean(os.getenv("KALSHI_EMAIL", ""))
+            kalshi_password_check = clean(os.getenv("KALSHI_PASSWORD", ""))
             if kalshi_enabled and not all([kalshi_email_check, kalshi_password_check]):
                 raise ValueError("Missing Kalshi credentials in .env (required when Kalshi is enabled)")
 
@@ -148,9 +166,9 @@ class Config:
             min_quality_score = float(os.getenv("MIN_MARKET_QUALITY_SCORE", "50.0"))
 
             # Kalshi credentials (optional)
-            kalshi_email = os.getenv("KALSHI_EMAIL", "").strip()
-            kalshi_password = os.getenv("KALSHI_PASSWORD", "").strip()
-            kalshi_api_key = os.getenv("KALSHI_API_KEY", "").strip()
+            kalshi_email = clean(os.getenv("KALSHI_EMAIL", ""))
+            kalshi_password = clean(os.getenv("KALSHI_PASSWORD", ""))
+            kalshi_api_key = clean(os.getenv("KALSHI_API_KEY", ""))
 
             # Multi-platform settings
             enabled_platforms_str = os.getenv("ENABLED_PLATFORMS", "polymarket")

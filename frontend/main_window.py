@@ -23,6 +23,7 @@ from frontend.components.credentials_panel import CredentialsPanel
 from backend.logger import logger
 from backend.config import Config
 from backend.arbitrage import ArbitrageBot
+from backend.multi_platform_arbitrage import MultiPlatformArbitrageBot
 from backend.services.data_collector import DataCollector
 from backend.services.backtest_engine import BacktestEngine
 
@@ -229,10 +230,17 @@ class MainWindow(QMainWindow):
 
         try:
             cfg = Config.load()
-            self.bot = ArbitrageBot(cfg)
+            
+            # Choose bot engine based on enabled platforms
+            if "kalshi" in cfg.ENABLED_PLATFORMS:
+                logger.info("Initializing MULTI-PLATFORM bot engine (Polymarket + Kalshi)...")
+                self.bot = MultiPlatformArbitrageBot(cfg)
+            else:
+                logger.info("Initializing STANDARD bot engine (Polymarket Only)...")
+                self.bot = ArbitrageBot(cfg)
 
-            # Initialize Backtest Engine with the bot's data collector
-            if self.bot.data_collector:
+            # Initialize Backtest Engine with the bot's data collector (if supported by the bot)
+            if hasattr(self.bot, 'data_collector') and self.bot.data_collector:
                 backtest_engine = BacktestEngine(self.bot.data_collector)
                 self.backtest_widget.set_engine(backtest_engine)
                 # Sync backtest settings with current bot config

@@ -90,10 +90,6 @@ class TradeStorage:
                 ON trades(status)
             """)
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_trades_platform
-                ON trades(platform)
-            """)
-            conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_cross_trades_timestamp
                 ON cross_platform_trades(timestamp)
             """)
@@ -103,6 +99,12 @@ class TradeStorage:
                 conn.execute("ALTER TABLE trades ADD COLUMN platform TEXT DEFAULT 'polymarket'")
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+            # Index for platform (Must be after migration)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_trades_platform
+                ON trades(platform)
+            """)
 
     def save_trade(self, trade: Dict) -> int:
         """

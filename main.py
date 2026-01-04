@@ -5,7 +5,12 @@ from PySide6.QtWidgets import QApplication
 from frontend.main_window import MainWindow
 from backend.logger import logger
 
+from backend.utils.ssl_patch import apply_ssl_patch
+
 def main():
+    # Apply SSL patch for macOS certificate issues
+    apply_ssl_patch()
+    
     logger.info("Initializing Application...")
     
     app = QApplication(sys.argv)
