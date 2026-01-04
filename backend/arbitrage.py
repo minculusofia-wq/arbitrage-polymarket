@@ -15,6 +15,10 @@ from backend.services.trade_storage import TradeStorage
 from backend.services.rate_limiter import APIRateLimiter
 from backend.services.risk_manager import RiskManager
 from backend.services.position_monitor import PositionMonitor, ExitExecutor, BalanceManager
+from backend.services.paper_trading import ITradeExecutor, PaperTradeExecutor
+from backend.services.data_collector import DataCollector
+from backend.services.capital_allocator import CapitalAllocator, AllocationResult
+from backend.services.time_patterns import TimePatternAnalyzer, MomentumDetector, get_combined_time_multiplier
 
 # Constants
 MAX_EXECUTION_WINDOW = 20  # seconds
@@ -92,6 +96,8 @@ class OpportunityCache:
     roi: float
     timestamp: float
     executed: bool = False
+    market_score: float = 0.0  # PHASE 5: Market quality score
+    momentum: str = "NEW"      # PHASE 5: IMPROVING, STABLE, DEGRADING, NEW
 
 
 class OpportunityManager:
@@ -102,15 +108,22 @@ class OpportunityManager:
     def __init__(self, min_profit_margin: float):
         self.opportunities: Dict[str, OpportunityCache] = {}
         self.min_margin = min_profit_margin
+        self._momentum_detector = MomentumDetector(lookback_seconds=60)
 
     def update(self, market_id: str, yes_token: str, no_token: str,
-               yes_price: float, no_price: float) -> Optional[OpportunityCache]:
+               yes_price: float, no_price: float,
+               market_score: float = 0.0) -> Optional[OpportunityCache]:
         """Update opportunity cache. Returns opportunity if profitable."""
         cost = yes_price + no_price
         target = 1.0 - self.min_margin
 
         if cost < target and cost > 0:
             roi = (1.0 - cost) / cost * 100
+
+            # PHASE 5: Detect momentum
+            self._momentum_detector.record_cost(market_id, cost)
+            momentum = self._momentum_detector.detect_momentum(market_id, cost)
+
             opp = OpportunityCache(
                 market_id=market_id,
                 yes_token=yes_token,
@@ -119,7 +132,9 @@ class OpportunityManager:
                 no_price=no_price,
                 cost=cost,
                 roi=roi,
-                timestamp=time.time()
+                timestamp=time.time(),
+                market_score=market_score,
+                momentum=momentum
             )
             self.opportunities[market_id] = opp
             return opp
@@ -127,6 +142,13 @@ class OpportunityManager:
         # Remove if no longer profitable
         self.opportunities.pop(market_id, None)
         return None
+
+    def get_priority_score(self, market_id: str) -> float:
+        """Get execution priority score based on momentum."""
+        opp = self.opportunities.get(market_id)
+        if not opp:
+            return 1.0
+        return self._momentum_detector.get_priority_score(market_id, opp.cost)
 
     def get_best(self, n: int = 5) -> List[OpportunityCache]:
         """Returns the N best opportunities sorted by ROI (descending)."""
@@ -357,6 +379,16 @@ class ArbitrageBot:
         self.opportunity_manager = OpportunityManager(config.MIN_PROFIT_MARGIN)
 
         # ============================================
+        # PHASE 5: CAPITAL ALLOCATOR & TIME PATTERNS
+        # ============================================
+        self.capital_allocator = CapitalAllocator(
+            base_capital=config.CAPITAL_PER_TRADE,
+            max_daily_loss=config.MAX_DAILY_LOSS,
+            min_allocation_percent=0.5,
+            max_allocation_percent=1.5
+        )
+
+        # ============================================
         # PHASE 2: ADVANCED SERVICES
         # ============================================
         self.trade_storage = TradeStorage()
@@ -402,6 +434,30 @@ class ArbitrageBot:
             check_interval=5.0,
             on_exit_signal=self._handle_exit_signal
         )
+
+        # ============================================
+        # PHASE 4: PAPER TRADING & DATA COLLECTION
+        # ============================================
+        self.is_paper_mode = config.PAPER_TRADING_ENABLED
+        self.paper_executor: Optional[PaperTradeExecutor] = None
+        self.data_collector: Optional[DataCollector] = None
+
+        if config.PAPER_TRADING_ENABLED:
+            self.paper_executor = PaperTradeExecutor(
+                db_path="data/paper_trades.db",
+                initial_balance=config.PAPER_INITIAL_BALANCE,
+                fill_probability=0.95,
+                slippage_bps=5.0
+            )
+            logger.info(f"Paper Trading Mode ENABLED - Balance: ${config.PAPER_INITIAL_BALANCE:.2f}")
+
+        if config.DATA_COLLECTION_ENABLED:
+            self.data_collector = DataCollector(
+                db_path="data/snapshots.db",
+                snapshot_interval_ms=config.SNAPSHOT_INTERVAL_MS,
+                batch_size=100
+            )
+            logger.info(f"Data Collection ENABLED - Interval: {config.SNAPSHOT_INTERVAL_MS}ms")
 
     async def _handle_exit_signal(self, position: dict, reason: str):
         """Handle exit signal from position monitor."""
@@ -613,15 +669,25 @@ class ArbitrageBot:
             self.position_monitor.update_order_books(self.order_books)
             self.position_monitor.update_positions(self.positions)
 
+            # PHASE 4: Capture order book snapshot for backtesting
+            if self.data_collector and self.data_collector.is_running:
+                market_id = self.token_to_market.get(tid)
+                if market_id:
+                    self.data_collector.capture_snapshot(
+                        token_id=tid,
+                        market_id=market_id,
+                        order_book=self.order_books[tid]
+                    )
+
             # Find which market this token belongs to
             # Then check Arb for that market
             await self.check_arbitrage(tid)
 
     async def check_arbitrage(self, token_id: str):
         """
-        DEPTH-AWARE arbitrage detection.
+        DEPTH-AWARE arbitrage detection with PHASE 5 optimizations.
         Calculates the REAL cost of buying across order book levels,
-        not just the top-of-book price.
+        including trading fees, position limits, and time-based adjustments.
 
         This is CRITICAL: Without depth analysis, the bot will see
         "YES=0.45 + NO=0.50 = 0.95" but actually pay ~1.02 when buying
@@ -630,6 +696,11 @@ class ArbitrageBot:
         # PHASE 2: Check daily loss limit before processing
         if not self.risk_manager.check_daily_limit():
             return  # Daily loss limit reached, stop trading
+
+        # PHASE 5: Check if capital allocator says to stop
+        if self.capital_allocator.should_stop_trading():
+            logger.warning("Daily loss limit reached via CapitalAllocator")
+            return
 
         # Fast O(1) lookup using token_to_market index
         market_id = self.token_to_market.get(token_id)
@@ -650,8 +721,15 @@ class ArbitrageBot:
         if not ask_yes_list or not ask_no_list:
             return
 
-        # CRITICAL: Calculate optimal size based on order book DEPTH
-        target_cost = 1.0 - self.config.MIN_PROFIT_MARGIN
+        # PHASE 5: Limit order book depth to MAX_ORDER_BOOK_DEPTH
+        ask_yes_list = ask_yes_list[:self.config.MAX_ORDER_BOOK_DEPTH]
+        ask_no_list = ask_no_list[:self.config.MAX_ORDER_BOOK_DEPTH]
+
+        # PHASE 5: Apply trading fees to target cost
+        # Fee is applied twice (once for YES, once for NO)
+        fee_multiplier = 1.0 + (self.config.TRADING_FEE_PERCENT * 2)
+        base_target_cost = 1.0 - self.config.MIN_PROFIT_MARGIN
+        target_cost_with_fees = base_target_cost / fee_multiplier
 
         # Calculate max shares we might want based on capital
         max_possible_shares = self.config.CAPITAL_PER_TRADE / 0.5  # Rough estimate
@@ -659,7 +737,7 @@ class ArbitrageBot:
         optimal_shares, eff_yes, eff_no = MarketImpactCalculator.find_optimal_trade_size(
             ask_yes_list,
             ask_no_list,
-            max_combined_cost=target_cost,
+            max_combined_cost=target_cost_with_fees,
             max_shares=max_possible_shares,
             precision=1.0
         )
@@ -668,25 +746,61 @@ class ArbitrageBot:
             return  # No profitable opportunity at any size
 
         effective_cost = eff_yes + eff_no
+        effective_cost_with_fees = effective_cost * fee_multiplier
 
-        if effective_cost >= target_cost:
-            return  # Not profitable after market impact
+        if effective_cost_with_fees >= base_target_cost:
+            return  # Not profitable after fees
 
-        roi = (1.0 - effective_cost) / effective_cost * 100
+        # PHASE 5: Check minimum profit in dollars
+        expected_profit = optimal_shares * (1.0 - effective_cost_with_fees)
+        if expected_profit < self.config.MIN_PROFIT_DOLLARS:
+            logger.debug(
+                f"Profit too low: ${expected_profit:.2f} < ${self.config.MIN_PROFIT_DOLLARS:.2f}"
+            )
+            return
+
+        roi = (1.0 - effective_cost_with_fees) / effective_cost_with_fees * 100
+
+        # PHASE 5: Check position limits before continuing
+        open_positions = len([p for p in self.positions if p.get('status') == 'EXECUTED'])
+        if open_positions >= self.config.MAX_CONCURRENT_POSITIONS:
+            logger.debug(
+                f"Position limit: {open_positions}/{self.config.MAX_CONCURRENT_POSITIONS}"
+            )
+            return
+
+        # PHASE 5: Time-based trading check
+        time_summary = TimePatternAnalyzer.get_trading_summary()
+        min_quality = TimePatternAnalyzer.get_min_quality_score(
+            self.config.MIN_MARKET_QUALITY_SCORE
+        )
 
         # Update opportunity cache with EFFECTIVE prices (not top-of-book)
         opportunity = self.opportunity_manager.update(
-            market_id, yes_token, no_token, eff_yes, eff_no
+            market_id, yes_token, no_token, eff_yes, eff_no,
+            market_score=0.0  # Market score will be updated by MarketScorer if available
         )
 
-        # Log with depth-aware info
+        # PHASE 4: Log opportunity for backtesting analysis
+        if self.data_collector and self.data_collector.is_running:
+            self.data_collector.log_opportunity(
+                market_id=market_id,
+                yes_price=eff_yes,
+                no_price=eff_no,
+                optimal_shares=optimal_shares,
+                was_executed=False  # Will be updated if executed
+            )
+
+        # Log with depth-aware info and fees
         top_yes = float(ask_yes_list[0]['price'])
         top_no = float(ask_no_list[0]['price'])
         logger.info(
             f"DEPTH-AWARE ARB: {market_id} | "
             f"Top: {top_yes:.3f}+{top_no:.3f}={top_yes+top_no:.3f} | "
             f"Effective: {eff_yes:.4f}+{eff_no:.4f}={effective_cost:.4f} | "
-            f"Shares: {optimal_shares:.1f} | ROI: {roi:.2f}%"
+            f"WithFees: {effective_cost_with_fees:.4f} | "
+            f"Shares: {optimal_shares:.1f} | ROI: {roi:.2f}% | "
+            f"Profit: ${expected_profit:.2f} | Period: {time_summary['period']}"
         )
 
         # Notify UI with effective prices
@@ -707,9 +821,15 @@ class ArbitrageBot:
             logger.debug(f"Market {market_id} already executing")
             return
 
-        # Execute with depth-aware parameters
+        # Execute with depth-aware parameters and momentum priority
+        priority = self.opportunity_manager.get_priority_score(market_id)
+        momentum = opportunity.momentum if opportunity else "NEW"
+
+        logger.debug(f"Executing {market_id} with priority {priority:.2f} (momentum: {momentum})")
+
         await self.execute_depth_aware_trade(
-            market_id, yes_token, no_token, optimal_shares, eff_yes, eff_no
+            market_id, yes_token, no_token, optimal_shares, eff_yes, eff_no,
+            roi_percent=roi, time_multiplier=TimePatternAnalyzer.get_time_multiplier()
         )
 
     async def execute_with_slippage_check(self, market_id: str, yes_token: str, no_token: str,
@@ -747,14 +867,17 @@ class ArbitrageBot:
 
     async def execute_depth_aware_trade(
         self, market_id: str, yes_token: str, no_token: str,
-        shares: float, price_yes: float, price_no: float
+        shares: float, price_yes: float, price_no: float,
+        roi_percent: float = 0.0, time_multiplier: float = 1.0
     ) -> bool:
         """
         Execute trade with pre-calculated optimal size from depth analysis.
+        PHASE 5: Includes dynamic capital allocation based on opportunity quality.
 
         Unlike execute_trade which calculates shares from capital/cost,
         this method uses the pre-calculated optimal shares from
-        MarketImpactCalculator.find_optimal_trade_size().
+        MarketImpactCalculator.find_optimal_trade_size(), adjusted by
+        the CapitalAllocator.
 
         Args:
             market_id: Market identifier
@@ -763,6 +886,8 @@ class ArbitrageBot:
             shares: Pre-calculated optimal number of shares
             price_yes: Effective YES price (weighted average across levels)
             price_no: Effective NO price (weighted average across levels)
+            roi_percent: Expected ROI percentage for allocation calculation
+            time_multiplier: Time-based allocation multiplier
 
         Returns:
             True if trade executed successfully, False otherwise
@@ -774,14 +899,30 @@ class ArbitrageBot:
         try:
             start_time = time.time()
 
-            # PHASE 3: Verify sufficient balance before trade
-            required_amount = shares * (price_yes + price_no)
-            can_trade, balance, message = await self.balance_manager.can_trade(required_amount)
-            if not can_trade:
-                logger.warning(f"Balance check failed: {message}")
-                return False
+            # PHASE 5: Calculate dynamic allocation based on opportunity quality
+            allocation_result = self.capital_allocator.calculate_allocation(
+                roi_percent=roi_percent,
+                market_score=None,  # Will be integrated with MarketScorer later
+                daily_pnl=None,     # Uses internal tracker
+                levels_consumed=1   # Will be updated after depth check
+            )
 
-            # Re-verify liquidity before execution
+            # Adjust shares based on allocation
+            base_cost = price_yes + price_no
+            if base_cost > 0:
+                allocated_shares = allocation_result.allocated_capital / base_cost
+                # Apply time multiplier
+                allocated_shares *= time_multiplier
+                # Cap to optimal shares (don't exceed liquidity)
+                shares = min(shares, allocated_shares)
+                shares = round(shares, 2)
+
+            logger.debug(
+                f"Allocation: ${allocation_result.allocated_capital:.2f} -> "
+                f"{shares:.2f} shares ({allocation_result.reason})"
+            )
+
+            # Re-verify liquidity before execution (do this BEFORE balance check)
             ask_yes = self.order_books.get(yes_token, {}).get('asks', [])
             ask_no = self.order_books.get(no_token, {}).get('asks', [])
 
@@ -792,11 +933,28 @@ class ArbitrageBot:
                 logger.warning(f"Liquidity disappeared for {market_id}")
                 return False
 
+            # PHASE 3 + PHASE 5: Verify sufficient balance with dynamic buffer
+            required_amount = shares * (price_yes + price_no)
+            can_trade, balance, message = await self.balance_manager.can_trade(
+                required_amount,
+                levels_yes=yes_result.levels_consumed,
+                levels_no=no_result.levels_consumed
+            )
+            if not can_trade:
+                logger.warning(f"Balance check failed: {message}")
+                return False
+
             current_cost = yes_result.effective_price + no_result.effective_price
+
+            # PHASE 5: Apply fees to profitability check
+            fee_multiplier = 1.0 + (self.config.TRADING_FEE_PERCENT * 2)
             target_cost = 1.0 - self.config.MIN_PROFIT_MARGIN
 
-            if current_cost >= target_cost:
-                logger.warning(f"No longer profitable after re-check: {current_cost:.4f} >= {target_cost:.4f}")
+            if current_cost * fee_multiplier >= target_cost:
+                logger.warning(
+                    f"No longer profitable after re-check with fees: "
+                    f"{current_cost * fee_multiplier:.4f} >= {target_cost:.4f}"
+                )
                 return False
 
             # Check execution window
@@ -804,32 +962,49 @@ class ArbitrageBot:
                 logger.error("Execution window exceeded. Aborting.")
                 return False
 
+            mode_str = "[PAPER]" if self.is_paper_mode else "[LIVE]"
             logger.info(
-                f"EXECUTING: {market_id} | {shares:.2f} shares | "
+                f"{mode_str} EXECUTING: {market_id} | {shares:.2f} shares | "
                 f"YES@{yes_result.effective_price:.4f} (L{yes_result.levels_consumed}) + "
                 f"NO@{no_result.effective_price:.4f} (L{no_result.levels_consumed}) = "
-                f"{current_cost:.4f}"
+                f"{current_cost:.4f} | Allocation: {allocation_result.reason}"
             )
 
-            loop = asyncio.get_running_loop()
+            # PHASE 4: Paper Trading Mode - Simulate execution
+            if self.is_paper_mode and self.paper_executor:
+                result = await self.paper_executor.execute_trade(
+                    market_id=market_id,
+                    yes_token=yes_token,
+                    no_token=no_token,
+                    shares=shares,
+                    price_yes=yes_result.effective_price,
+                    price_no=no_result.effective_price,
+                    levels_yes=yes_result.levels_consumed,
+                    levels_no=no_result.levels_consumed
+                )
+                success = result.get('success', False)
+                if not success:
+                    logger.warning(f"[PAPER] Trade simulation failed: {result.get('reason')}")
+            else:
+                # LIVE MODE: Execute real orders
+                loop = asyncio.get_running_loop()
 
-            # PHASE 2: Rate limit order API calls (acquire 2 slots for parallel orders)
-            await self.rate_limiter.acquire('orders')
-            await self.rate_limiter.acquire('orders')
+                # PHASE 2: Rate limit order API calls (acquire 2 slots for parallel orders)
+                await self.rate_limiter.acquire('orders')
+                await self.rate_limiter.acquire('orders')
 
-            # Execute both orders in parallel with effective prices
-            t1 = loop.run_in_executor(
-                None,
-                lambda: self._place_order(yes_token, shares, yes_result.effective_price)
-            )
-            t2 = loop.run_in_executor(
-                None,
-                lambda: self._place_order(no_token, shares, no_result.effective_price)
-            )
+                # Execute both orders in parallel with effective prices
+                t1 = loop.run_in_executor(
+                    None,
+                    lambda: self._place_order(yes_token, shares, yes_result.effective_price)
+                )
+                t2 = loop.run_in_executor(
+                    None,
+                    lambda: self._place_order(no_token, shares, no_result.effective_price)
+                )
 
-            results = await asyncio.gather(t1, t2, return_exceptions=True)
-
-            success = all(not isinstance(r, Exception) and r is not None for r in results)
+                results = await asyncio.gather(t1, t2, return_exceptions=True)
+                success = all(not isinstance(r, Exception) and r is not None for r in results)
 
             if success:
                 profit = shares * (1.0 - current_cost)
@@ -866,6 +1041,9 @@ class ArbitrageBot:
 
                 # PHASE 2: Record P&L for daily tracking
                 self.risk_manager.record_pnl(profit)
+
+                # PHASE 5: Update capital allocator's daily P&L tracker
+                self.capital_allocator.update_daily_pnl(profit)
 
                 # PHASE 3: Invalidate balance cache
                 self.balance_manager.invalidate_cache()
@@ -987,6 +1165,11 @@ class ArbitrageBot:
         self.position_monitor.start()
         logger.info("Position Monitor started")
 
+        # PHASE 4: Start data collector for backtesting
+        if self.data_collector:
+            self.data_collector.start()
+            logger.info("Data Collector started")
+
         while self.running:
             try:
                 await self.connect_and_listen()
@@ -1009,6 +1192,12 @@ class ArbitrageBot:
 
         # Stop position monitor
         self.position_monitor.stop()
+
+        # PHASE 4: Stop data collector
+        if self.data_collector:
+            await self.data_collector.stop()
+            logger.info(f"Data Collector stopped. Stats: {self.data_collector.get_stats()}")
+
         logger.info("Arbitrage Engine stopped.")
 
     async def _handle_reconnection(self, error_msg: str):

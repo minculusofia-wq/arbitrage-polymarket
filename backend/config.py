@@ -37,6 +37,19 @@ class Config:
     MAX_SLIPPAGE: float = 0.005     # Maximum acceptable slippage (0.5%)
     OPPORTUNITY_CACHE_TTL: float = 60.0  # Opportunity cache expiration
 
+    # Paper Trading / Backtest settings
+    PAPER_TRADING_ENABLED: bool = False  # Run in paper trading mode (no real trades)
+    DATA_COLLECTION_ENABLED: bool = True  # Collect order book snapshots for backtesting
+    SNAPSHOT_INTERVAL_MS: int = 1000  # Interval between snapshots in milliseconds
+    PAPER_INITIAL_BALANCE: float = 10000.0  # Starting balance for paper trading
+
+    # Advanced Optimization settings
+    TRADING_FEE_PERCENT: float = 0.01  # Trading fee per side (1% = 0.01)
+    MIN_PROFIT_DOLLARS: float = 1.0  # Minimum absolute profit per trade in $
+    MAX_CONCURRENT_POSITIONS: int = 10  # Maximum simultaneous open positions
+    MAX_ORDER_BOOK_DEPTH: int = 20  # Maximum order book levels to analyze
+    MIN_MARKET_QUALITY_SCORE: float = 50.0  # Minimum market quality score (0-100)
+
     @classmethod
     def load(cls):
         """
@@ -89,6 +102,19 @@ class Config:
             max_slippage = float(os.getenv("MAX_SLIPPAGE", "0.005"))
             opportunity_cache_ttl = float(os.getenv("OPPORTUNITY_CACHE_TTL", "60.0"))
 
+            # Paper Trading / Backtest settings
+            paper_trading = os.getenv("PAPER_TRADING_ENABLED", "false").lower() in ("true", "1", "yes")
+            data_collection = os.getenv("DATA_COLLECTION_ENABLED", "true").lower() in ("true", "1", "yes")
+            snapshot_interval = int(os.getenv("SNAPSHOT_INTERVAL_MS", "1000"))
+            paper_balance = float(os.getenv("PAPER_INITIAL_BALANCE", "10000.0"))
+
+            # Advanced Optimization settings
+            trading_fee = float(os.getenv("TRADING_FEE_PERCENT", "0.01"))
+            min_profit_dollars = float(os.getenv("MIN_PROFIT_DOLLARS", "1.0"))
+            max_positions = int(os.getenv("MAX_CONCURRENT_POSITIONS", "10"))
+            max_depth = int(os.getenv("MAX_ORDER_BOOK_DEPTH", "20"))
+            min_quality_score = float(os.getenv("MIN_MARKET_QUALITY_SCORE", "50.0"))
+
             return cls(
                 POLY_API_KEY=api_key,
                 POLY_API_SECRET=api_secret,
@@ -107,6 +133,17 @@ class Config:
                 COOLDOWN_SECONDS=cooldown_seconds,
                 MAX_SLIPPAGE=max_slippage,
                 OPPORTUNITY_CACHE_TTL=opportunity_cache_ttl,
+                # Paper Trading / Backtest settings
+                PAPER_TRADING_ENABLED=paper_trading,
+                DATA_COLLECTION_ENABLED=data_collection,
+                SNAPSHOT_INTERVAL_MS=snapshot_interval,
+                PAPER_INITIAL_BALANCE=paper_balance,
+                # Advanced Optimization settings
+                TRADING_FEE_PERCENT=trading_fee,
+                MIN_PROFIT_DOLLARS=min_profit_dollars,
+                MAX_CONCURRENT_POSITIONS=max_positions,
+                MAX_ORDER_BOOK_DEPTH=max_depth,
+                MIN_MARKET_QUALITY_SCORE=min_quality_score,
             )
         except Exception as e:
             # Re-raise to be handled by caller (UI or Main)

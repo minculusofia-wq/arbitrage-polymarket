@@ -507,29 +507,63 @@ class BalanceManager:
             logger.error(f"Balance fetch error: {e}")
             return self.fallback_balance
 
-    async def can_trade(self, required_amount: float) -> tuple:
+    async def can_trade(
+        self,
+        required_amount: float,
+        levels_yes: int = 1,
+        levels_no: int = 1
+    ) -> tuple:
         """
         Check if we have sufficient balance for a trade.
+        PHASE 5: Uses dynamic buffer based on order book depth.
 
         Args:
             required_amount: USDC amount needed for the trade.
+            levels_yes: Number of YES order book levels consumed.
+            levels_no: Number of NO order book levels consumed.
 
         Returns:
             Tuple of (can_trade: bool, current_balance: float, message: str).
         """
         balance = await self.get_balance()
 
-        # Add 5% buffer for fees and slippage
-        required_with_buffer = required_amount * 1.05
+        # PHASE 5: Dynamic buffer based on order book depth
+        buffer = self.calculate_dynamic_buffer(levels_yes, levels_no)
+        required_with_buffer = required_amount * buffer
 
         if balance >= required_with_buffer:
-            return True, balance, "Sufficient balance"
+            return True, balance, f"Sufficient balance (buffer: {buffer:.1%})"
         else:
             return (
                 False,
                 balance,
-                f"Insufficient balance: ${balance:.2f} < ${required_with_buffer:.2f}"
+                f"Insufficient balance: ${balance:.2f} < ${required_with_buffer:.2f} (buffer: {buffer:.1%})"
             )
+
+    def calculate_dynamic_buffer(self, levels_yes: int = 1, levels_no: int = 1) -> float:
+        """
+        Calculate dynamic buffer based on order book depth consumed.
+        PHASE 5: Higher depth = more slippage risk = larger buffer needed.
+
+        Args:
+            levels_yes: Number of YES order book levels consumed.
+            levels_no: Number of NO order book levels consumed.
+
+        Returns:
+            Buffer multiplier (1.02 to 1.10).
+        """
+        base_buffer = 1.02  # 2% minimum buffer
+        depth_penalty = 0.005  # 0.5% per level beyond first
+
+        total_levels = levels_yes + levels_no
+        extra_levels = max(0, total_levels - 2)  # First level of each is "free"
+
+        depth_buffer = extra_levels * depth_penalty
+
+        # Cap at 10% max buffer
+        final_buffer = min(base_buffer + depth_buffer, 1.10)
+
+        return final_buffer
 
     def invalidate_cache(self):
         """Invalidate the balance cache (call after trades)."""

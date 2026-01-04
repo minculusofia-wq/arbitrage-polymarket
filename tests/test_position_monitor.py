@@ -357,14 +357,42 @@ class TestBalanceManager:
 
     @pytest.mark.asyncio
     async def test_can_trade_with_buffer(self, balance_manager):
-        """Should account for 5% buffer in balance check."""
-        # 950 * 1.05 = 997.5, just under 1000
-        can_trade1, _, _ = await balance_manager.can_trade(950.0)
+        """Should account for dynamic buffer (2% base) in balance check."""
+        # 975 * 1.02 = 994.5, just under 1000 (with base 2% buffer)
+        can_trade1, _, _ = await balance_manager.can_trade(975.0)
         assert can_trade1 is True
 
-        # 960 * 1.05 = 1008, over 1000
-        can_trade2, _, _ = await balance_manager.can_trade(960.0)
+        # 985 * 1.02 = 1004.7, over 1000
+        can_trade2, _, _ = await balance_manager.can_trade(985.0)
         assert can_trade2 is False
+
+    @pytest.mark.asyncio
+    async def test_can_trade_with_dynamic_buffer(self, balance_manager):
+        """Should increase buffer with more order book levels consumed."""
+        # With 5 levels each (10 total - 2 = 8 extra levels)
+        # Buffer = 1.02 + 8 * 0.005 = 1.06
+        # 945 * 1.06 = 1001.7, just over 1000
+        can_trade1, _, msg = await balance_manager.can_trade(945.0, levels_yes=5, levels_no=5)
+        assert can_trade1 is False
+        assert "buffer" in msg.lower()
+
+        # 940 * 1.06 = 996.4, just under 1000
+        can_trade2, _, _ = await balance_manager.can_trade(940.0, levels_yes=5, levels_no=5)
+        assert can_trade2 is True
+
+    def test_calculate_dynamic_buffer(self, balance_manager):
+        """Should calculate buffer based on depth consumed."""
+        # Base case: 1 level each = 2% buffer
+        buffer1 = balance_manager.calculate_dynamic_buffer(1, 1)
+        assert buffer1 == 1.02
+
+        # 3 levels each = 1.02 + (6-2)*0.005 = 1.04
+        buffer2 = balance_manager.calculate_dynamic_buffer(3, 3)
+        assert abs(buffer2 - 1.04) < 0.001
+
+        # Max cap at 10%
+        buffer3 = balance_manager.calculate_dynamic_buffer(20, 20)
+        assert buffer3 == 1.10
 
     def test_invalidate_cache(self, balance_manager):
         """Should clear cached balance."""

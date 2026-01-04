@@ -14,11 +14,14 @@ from frontend.components.market_monitor import MarketMonitorWidget
 from frontend.components.config_widget import ConfigWidget
 from frontend.components.pnl_dashboard import PnLDashboard
 from frontend.components.trade_history import TradeHistoryWidget
+from frontend.components.backtest_widget import BacktestWidget
 
 # Backend Imports
 from backend.logger import logger
 from backend.config import Config
 from backend.arbitrage import ArbitrageBot
+from backend.services.data_collector import DataCollector
+from backend.services.backtest_engine import BacktestEngine
 
 # Logging Handler for UI
 class QtLogHandler(logging.Handler):
@@ -101,6 +104,10 @@ class MainWindow(QMainWindow):
         self.trade_history = TradeHistoryWidget()
         self.tabs.addTab(self.trade_history, "Trade History")
 
+        # Backtest Tab - Initialize with None, will set engine when bot starts
+        self.backtest_widget = BacktestWidget(None)
+        self.tabs.addTab(self.backtest_widget, "Backtest")
+
         left_layout.addWidget(self.tabs, stretch=2)
 
         # Logs
@@ -162,6 +169,12 @@ class MainWindow(QMainWindow):
         try:
             cfg = Config.load()
             self.bot = ArbitrageBot(cfg)
+
+            # Initialize Backtest Engine with the bot's data collector
+            if self.bot.data_collector:
+                backtest_engine = BacktestEngine(self.bot.data_collector)
+                self.backtest_widget.set_engine(backtest_engine)
+                logger.info("Backtest Engine initialized with Data Collector")
 
             # Initialize PnL dashboard with capital
             self.pnl_dashboard.set_initial_balance(cfg.CAPITAL_PER_TRADE)
