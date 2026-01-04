@@ -34,7 +34,7 @@ class TestKalshiClient:
     def test_production_url(self, credentials):
         client = KalshiClient(credentials, use_demo=False)
         assert "demo" not in client.base_url
-        assert "trading-api.kalshi.com" in client.base_url
+        assert "api.elections.kalshi.com" in client.base_url
 
     @pytest.mark.asyncio
     async def test_connect_invalid_credentials(self):
