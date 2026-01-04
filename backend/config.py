@@ -1,7 +1,7 @@
 import os
 import sys
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, List
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -50,6 +50,15 @@ class Config:
     MAX_ORDER_BOOK_DEPTH: int = 20  # Maximum order book levels to analyze
     MIN_MARKET_QUALITY_SCORE: float = 50.0  # Minimum market quality score (0-100)
 
+    # Kalshi credentials (optional)
+    KALSHI_EMAIL: str = ""
+    KALSHI_PASSWORD: str = ""
+    KALSHI_API_KEY: str = ""
+
+    # Multi-platform settings
+    ENABLED_PLATFORMS: List[str] = field(default_factory=lambda: ["polymarket"])
+    CROSS_PLATFORM_ARBITRAGE: bool = False  # Enable cross-platform arbitrage detection
+
     @classmethod
     def load(cls):
         """
@@ -58,13 +67,36 @@ class Config:
         """
         try:
             # Critical Credentials
-            api_key = os.getenv("POLY_API_KEY")
-            api_secret = os.getenv("POLY_API_SECRET")
-            passphrase = os.getenv("POLY_API_PASSPHRASE")
-            private_key = os.getenv("PRIVATE_KEY")
+            # Critical Credentials - Aggressively remove all whitespace/hidden chars
+            api_key = os.getenv("POLY_API_KEY", "").strip().replace(" ", "")
+            api_secret = os.getenv("POLY_API_SECRET", "").strip().replace(" ", "")
+            passphrase = os.getenv("POLY_API_PASSPHRASE", "").strip().replace(" ", "")
+            private_key = os.getenv("PRIVATE_KEY", "").strip().replace(" ", "")
 
-            if not all([api_key, api_secret, passphrase, private_key]):
-                raise ValueError("Missing critical API credentials in .env")
+            from backend.logger import logger
+            logger.info(f"Credential check - KEY len: {len(api_key)}, SECRET len: {len(api_secret)}, PASSPHRASE len: {len(passphrase)}, PK len: {len(private_key)}")
+
+            if private_key.startswith("0x"):
+                private_key = private_key[2:]
+
+            # Check which platforms are enabled to validate credentials
+            enabled_platforms_check = os.getenv("ENABLED_PLATFORMS", "polymarket")
+            poly_enabled = "polymarket" in enabled_platforms_check.lower()
+            kalshi_enabled = "kalshi" in enabled_platforms_check.lower()
+
+            # Validate Polymarket credentials only if Polymarket is enabled
+            if poly_enabled and not all([api_key, api_secret, passphrase, private_key]):
+                raise ValueError("Missing Polymarket API credentials in .env (required when Polymarket is enabled)")
+
+            # Validate Kalshi credentials only if Kalshi is enabled
+            kalshi_email_check = os.getenv("KALSHI_EMAIL", "").strip()
+            kalshi_password_check = os.getenv("KALSHI_PASSWORD", "").strip()
+            if kalshi_enabled and not all([kalshi_email_check, kalshi_password_check]):
+                raise ValueError("Missing Kalshi credentials in .env (required when Kalshi is enabled)")
+
+            # At least one platform must be enabled
+            if not poly_enabled and not kalshi_enabled:
+                raise ValueError("At least one platform must be enabled (polymarket or kalshi)")
 
             # Trading Parameters
             capital = os.getenv("CAPITAL_PER_TRADE")
@@ -115,6 +147,16 @@ class Config:
             max_depth = int(os.getenv("MAX_ORDER_BOOK_DEPTH", "20"))
             min_quality_score = float(os.getenv("MIN_MARKET_QUALITY_SCORE", "50.0"))
 
+            # Kalshi credentials (optional)
+            kalshi_email = os.getenv("KALSHI_EMAIL", "").strip()
+            kalshi_password = os.getenv("KALSHI_PASSWORD", "").strip()
+            kalshi_api_key = os.getenv("KALSHI_API_KEY", "").strip()
+
+            # Multi-platform settings
+            enabled_platforms_str = os.getenv("ENABLED_PLATFORMS", "polymarket")
+            enabled_platforms = [p.strip() for p in enabled_platforms_str.split(",") if p.strip()]
+            cross_platform = os.getenv("CROSS_PLATFORM_ARBITRAGE", "false").lower() in ("true", "1", "yes")
+
             return cls(
                 POLY_API_KEY=api_key,
                 POLY_API_SECRET=api_secret,
@@ -144,6 +186,13 @@ class Config:
                 MAX_CONCURRENT_POSITIONS=max_positions,
                 MAX_ORDER_BOOK_DEPTH=max_depth,
                 MIN_MARKET_QUALITY_SCORE=min_quality_score,
+                # Kalshi credentials
+                KALSHI_EMAIL=kalshi_email,
+                KALSHI_PASSWORD=kalshi_password,
+                KALSHI_API_KEY=kalshi_api_key,
+                # Multi-platform settings
+                ENABLED_PLATFORMS=enabled_platforms,
+                CROSS_PLATFORM_ARBITRAGE=cross_platform,
             )
         except Exception as e:
             # Re-raise to be handled by caller (UI or Main)

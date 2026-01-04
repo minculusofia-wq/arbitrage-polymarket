@@ -735,3 +735,29 @@ class BacktestWidget(QWidget):
                 QMessageBox.information(self, "Export", f"Results exported to:\n{filename}")
             except Exception as e:
                 QMessageBox.critical(self, "Export Error", str(e))
+    def sync_with_config(self, config_data: dict):
+        """Sync backtest parameters with main bot config."""
+        if 'CAPITAL_PER_TRADE' in config_data:
+            try:
+                self.config_panel.capital_per_trade.setValue(float(config_data['CAPITAL_PER_TRADE']))
+            except (ValueError, TypeError):
+                pass
+        
+        if 'MIN_PROFIT_MARGIN' in config_data:
+            try:
+                self.config_panel.min_margin.setValue(float(config_data['MIN_PROFIT_MARGIN']))
+            except (ValueError, TypeError):
+                pass
+
+        if 'COOLDOWN_SECONDS' in config_data:
+            try:
+                self.config_panel.cooldown.setValue(int(config_data['COOLDOWN_SECONDS']))
+            except (ValueError, TypeError):
+                pass
+        
+        # Also sync paper balance if applicable
+        if 'PAPER_INITIAL_BALANCE' in config_data:
+            try:
+                self.config_panel.initial_capital.setValue(float(config_data['PAPER_INITIAL_BALANCE']))
+            except (ValueError, TypeError):
+                pass

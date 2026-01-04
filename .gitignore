@@ -27,3 +27,9 @@ dist/
 *.pem
 *.key
 credentials.json
+
+# Data files (SQLite databases)
+data/
+*.db
+*.db-shm
+*.db-wal

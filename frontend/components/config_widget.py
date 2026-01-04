@@ -1,7 +1,8 @@
-
+import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QLineEdit, 
-    QFormLayout, QFrame, QPushButton, QHBoxLayout
+    QFormLayout, QFrame, QPushButton, QHBoxLayout,
+    QCheckBox
 )
 from PySide6.QtCore import Signal, Qt
 
@@ -55,6 +56,12 @@ class ConfigWidget(QFrame):
             form_layout.addRow(lbl, inp)
             
         layout.addLayout(form_layout)
+
+        # Paper Trading Toggle
+        self.paper_toggle = QCheckBox("🧪 Enable Paper Trading (Simulation)")
+        self.paper_toggle.setStyleSheet("color: #38bdf8; font-weight: bold; margin: 10px 0;")
+        self.paper_toggle.setToolTip("Run the bot without real money using simulated order fills.")
+        layout.addWidget(self.paper_toggle)
         
         layout.addStretch()
         
@@ -84,15 +91,72 @@ class ConfigWidget(QFrame):
             val = os.getenv(key)
             if val:
                 inp.setText(val)
+        
+        # Load paper trading toggle
+        paper_enabled = os.getenv("PAPER_TRADING_ENABLED", "false").lower() in ("true", "1", "yes")
+        self.paper_toggle.setChecked(paper_enabled)
 
     def on_start(self):
         data = {k: v.text().strip() for k, v in self.inputs.items()}
+        data["PAPER_TRADING_ENABLED"] = "true" if self.paper_toggle.isChecked() else "false"
+        
+        # Auto-save to .env
+        self._save_to_env(data)
+        
         self.start_requested.emit(data)
         self.btn_start.setEnabled(False)
+
+    def _save_to_env(self, data: dict):
+        """Persist settings to .env file."""
+        try:
+            from backend.logger import logger
+            env_path = ".env"
+            
+            # Read existing lines or start empty
+            lines = []
+            if os.path.exists(env_path):
+                with open(env_path, "r") as f:
+                    lines = f.readlines()
+            
+            # Parse existing keys
+            env_vars = {}
+            for line in lines:
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    env_vars[k.strip()] = line # Keep original formatting
+            
+            # Update with new data
+            new_lines = []
+            keys_handled = set()
+            
+            for line in lines:
+                if "=" in line and not line.startswith("#"):
+                    k = line.split("=", 1)[0].strip()
+                    if k in data:
+                        new_lines.append(f"{k}={data[k]}\n")
+                        keys_handled.add(k)
+                    else:
+                        new_lines.append(line)
+                else:
+                    new_lines.append(line)
+            
+            # Add new keys that weren't in the file
+            for k, v in data.items():
+                if k not in keys_handled and v:
+                    new_lines.append(f"{k}={v}\n")
+            
+            with open(env_path, "w") as f:
+                f.writelines(new_lines)
+            
+            logger.info("Configuration auto-saved to .env")
+        except Exception as e:
+            from backend.logger import logger
+            logger.error(f"Failed to auto-save configuration: {e}")
         self.btn_stop.setEnabled(True)
         # Lock inputs
         for inp in self.inputs.values():
             inp.setEnabled(False)
+        self.paper_toggle.setEnabled(False)
 
     def on_stop(self):
         self.stop_requested.emit()
@@ -101,3 +165,4 @@ class ConfigWidget(QFrame):
         # Unlock inputs
         for inp in self.inputs.values():
             inp.setEnabled(True)
+        self.paper_toggle.setEnabled(True)

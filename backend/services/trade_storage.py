@@ -30,9 +30,11 @@ class TradeStorage:
     def _init_db(self):
         """Create tables and indexes if they don't exist."""
         with sqlite3.connect(self.db_path) as conn:
+            # Main trades table with platform support
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    platform TEXT DEFAULT 'polymarket',
                     market_id TEXT NOT NULL,
                     side TEXT DEFAULT 'BOTH',
                     shares REAL NOT NULL,
@@ -49,6 +51,32 @@ class TradeStorage:
                     metadata TEXT
                 )
             """)
+
+            # Cross-platform trades table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS cross_platform_trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_id TEXT UNIQUE NOT NULL,
+                    question TEXT,
+                    platform_1 TEXT NOT NULL,
+                    market_id_1 TEXT NOT NULL,
+                    outcome_1 TEXT NOT NULL,
+                    price_1 REAL NOT NULL,
+                    shares_1 REAL NOT NULL,
+                    platform_2 TEXT NOT NULL,
+                    market_id_2 TEXT NOT NULL,
+                    outcome_2 TEXT NOT NULL,
+                    price_2 REAL NOT NULL,
+                    shares_2 REAL NOT NULL,
+                    total_cost REAL NOT NULL,
+                    status TEXT DEFAULT 'PENDING',
+                    pnl REAL DEFAULT 0.0,
+                    timestamp TEXT NOT NULL,
+                    metadata TEXT
+                )
+            """)
+
+            # Indexes
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_trades_timestamp
                 ON trades(timestamp)
@@ -61,6 +89,20 @@ class TradeStorage:
                 CREATE INDEX IF NOT EXISTS idx_trades_status
                 ON trades(status)
             """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_trades_platform
+                ON trades(platform)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_cross_trades_timestamp
+                ON cross_platform_trades(timestamp)
+            """)
+
+            # Migration: Add platform column if it doesn't exist
+            try:
+                conn.execute("ALTER TABLE trades ADD COLUMN platform TEXT DEFAULT 'polymarket'")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
     def save_trade(self, trade: Dict) -> int:
         """
@@ -81,11 +123,12 @@ class TradeStorage:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("""
                 INSERT INTO trades (
-                    market_id, side, shares, entry_cost, exit_value,
+                    platform, market_id, side, shares, entry_cost, exit_value,
                     pnl, roi, yes_price, no_price, status, timestamp,
                     levels_yes, levels_no, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
+                trade.get('platform', 'polymarket'),
                 trade.get('market_id'),
                 trade.get('side', 'BOTH'),
                 trade.get('shares'),
@@ -103,11 +146,84 @@ class TradeStorage:
             ))
             return cursor.lastrowid
 
+    def save_cross_platform_trade(self, trade: Dict) -> int:
+        """
+        Save a cross-platform trade to the database.
+
+        Args:
+            trade: Cross-platform trade dictionary with both legs.
+
+        Returns:
+            The ID of the inserted trade.
+        """
+        import uuid
+        timestamp = trade.get('timestamp')
+        if isinstance(timestamp, datetime):
+            timestamp = timestamp.isoformat()
+        elif isinstance(timestamp, (int, float)):
+            timestamp = datetime.fromtimestamp(timestamp).isoformat()
+        elif timestamp is None:
+            timestamp = datetime.now().isoformat()
+
+        trade_id = trade.get('trade_id', str(uuid.uuid4()))
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                INSERT INTO cross_platform_trades (
+                    trade_id, question, platform_1, market_id_1, outcome_1,
+                    price_1, shares_1, platform_2, market_id_2, outcome_2,
+                    price_2, shares_2, total_cost, status, pnl, timestamp, metadata
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                trade_id,
+                trade.get('question', ''),
+                trade.get('platform_1'),
+                trade.get('market_id_1'),
+                trade.get('outcome_1', 'Yes'),
+                trade.get('price_1'),
+                trade.get('shares_1', trade.get('shares')),
+                trade.get('platform_2'),
+                trade.get('market_id_2'),
+                trade.get('outcome_2', 'No'),
+                trade.get('price_2'),
+                trade.get('shares_2', trade.get('shares')),
+                trade.get('total_cost', trade.get('cost')),
+                trade.get('status', 'PENDING'),
+                trade.get('pnl', 0.0),
+                timestamp,
+                json.dumps(trade.get('metadata', {}))
+            ))
+            return cursor.lastrowid
+
+    def get_cross_platform_trades(
+        self,
+        limit: int = 100,
+        status: Optional[str] = None
+    ) -> List[Dict]:
+        """Get cross-platform trades."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            if status:
+                rows = conn.execute("""
+                    SELECT * FROM cross_platform_trades
+                    WHERE status = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                """, (status, limit)).fetchall()
+            else:
+                rows = conn.execute("""
+                    SELECT * FROM cross_platform_trades
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                """, (limit,)).fetchall()
+            return [dict(row) for row in rows]
+
     def get_trades(
         self,
         limit: int = 100,
         offset: int = 0,
-        status: Optional[str] = None
+        status: Optional[str] = None,
+        platform: Optional[str] = None
     ) -> List[Dict]:
         """
         Retrieve recent trades.
@@ -116,6 +232,7 @@ class TradeStorage:
             limit: Maximum number of trades to return.
             offset: Number of trades to skip.
             status: Filter by status (e.g., 'EXECUTED', 'FAILED').
+            platform: Filter by platform (e.g., 'polymarket', 'kalshi').
 
         Returns:
             List of trade dictionaries.
@@ -123,20 +240,21 @@ class TradeStorage:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
 
-            if status:
-                rows = conn.execute("""
-                    SELECT * FROM trades
-                    WHERE status = ?
-                    ORDER BY timestamp DESC
-                    LIMIT ? OFFSET ?
-                """, (status, limit, offset)).fetchall()
-            else:
-                rows = conn.execute("""
-                    SELECT * FROM trades
-                    ORDER BY timestamp DESC
-                    LIMIT ? OFFSET ?
-                """, (limit, offset)).fetchall()
+            query = "SELECT * FROM trades WHERE 1=1"
+            params = []
 
+            if status:
+                query += " AND status = ?"
+                params.append(status)
+
+            if platform:
+                query += " AND platform = ?"
+                params.append(platform)
+
+            query += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+
+            rows = conn.execute(query, params).fetchall()
             return [dict(row) for row in rows]
 
     def get_trade_by_id(self, trade_id: int) -> Optional[Dict]:

@@ -16,6 +16,7 @@ class TestPaperTrade:
     def test_paper_trade_creation(self):
         trade = PaperTrade(
             id=1,
+            platform="polymarket",
             market_id="market_123",
             yes_token="yes_token",
             no_token="no_token",
@@ -30,10 +31,12 @@ class TestPaperTrade:
         assert trade.id == 1
         assert trade.market_id == "market_123"
         assert trade.shares == 10.0
+        assert trade.platform == "polymarket"
 
     def test_paper_trade_to_dict(self):
         trade = PaperTrade(
             id=1,
+            platform="kalshi",
             market_id="market_123",
             yes_token="yes",
             no_token="no",
@@ -49,6 +52,7 @@ class TestPaperTrade:
         assert d['id'] == 1
         assert d['market_id'] == "market_123"
         assert d['shares'] == 10.0
+        assert d['platform'] == "kalshi"
         assert 'timestamp' in d
 
 

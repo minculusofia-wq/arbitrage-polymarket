@@ -13,6 +13,7 @@ class TestSnapshot:
     def test_snapshot_creation(self):
         snap = Snapshot(
             timestamp=1704067200000,
+            platform="polymarket",
             token_id="token_123",
             market_id="market_456",
             asks_json='[{"price": 0.45, "size": 100}]',
@@ -24,6 +25,7 @@ class TestSnapshot:
         assert snap.token_id == "token_123"
         assert snap.market_id == "market_456"
         assert snap.best_ask == 0.45
+        assert snap.platform == "polymarket"
 
 
 class TestOpportunityLog:

@@ -29,6 +29,7 @@ class BacktestConfig:
     cooldown_seconds: float = 30.0
     playback_speed: float = 100.0  # 100 = fast, 1.0 = real-time
     markets_filter: Optional[List[str]] = None  # None = all markets
+    platforms_filter: Optional[List[str]] = None  # None = all platforms ('polymarket', 'kalshi')
 
 
 @dataclass
@@ -44,6 +45,7 @@ class BacktestTrade:
     roi: float
     levels_yes: int
     levels_no: int
+    platform: str = "polymarket"  # Platform where trade was executed
 
     def to_dict(self) -> Dict:
         return {
@@ -56,7 +58,8 @@ class BacktestTrade:
             'expected_pnl': self.expected_pnl,
             'roi': self.roi,
             'levels_yes': self.levels_yes,
-            'levels_no': self.levels_no
+            'levels_no': self.levels_no,
+            'platform': self.platform
         }
 
 
@@ -195,7 +198,7 @@ class BacktestResult:
             # Trades section
             writer.writerow(["# Trade Details"])
             writer.writerow([
-                "Timestamp", "Market ID", "Shares", "YES Price", "NO Price",
+                "Timestamp", "Platform", "Market ID", "Shares", "YES Price", "NO Price",
                 "Entry Cost", "Expected P&L", "ROI %", "Levels YES", "Levels NO"
             ])
 
@@ -203,6 +206,7 @@ class BacktestResult:
                 ts = trade.timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(trade.timestamp, datetime) else trade.timestamp
                 writer.writerow([
                     ts,
+                    trade.platform,
                     trade.market_id,
                     f"{trade.shares:.2f}",
                     f"{trade.yes_price:.4f}",
@@ -376,11 +380,19 @@ class BacktestEngine:
         start_ts = int(config.start_time.timestamp() * 1000)
         end_ts = int(config.end_time.timestamp() * 1000)
 
+        # Determine platform filter for data loading
+        platform_filter = None
+        if config.platforms_filter and len(config.platforms_filter) == 1:
+            platform_filter = config.platforms_filter[0]
+
         logger.info(f"Loading snapshots from {config.start_time} to {config.end_time}")
+        if config.platforms_filter:
+            logger.info(f"Filtering by platforms: {config.platforms_filter}")
 
         snapshots = self.data_collector.get_snapshots_for_period(
             start_ts, end_ts,
-            market_id=config.markets_filter[0] if config.markets_filter and len(config.markets_filter) == 1 else None
+            market_id=config.markets_filter[0] if config.markets_filter and len(config.markets_filter) == 1 else None,
+            platform=platform_filter
         )
 
         if not snapshots:
@@ -411,6 +423,12 @@ class BacktestEngine:
             # Update order book state
             token_id = snapshot['token_id']
             market_id = snapshot['market_id']
+            platform = snapshot.get('platform', 'polymarket')  # Default to polymarket for legacy data
+
+            # Filter by platforms if multiple specified (single platform filtering done at query level)
+            if config.platforms_filter and len(config.platforms_filter) > 1:
+                if platform not in config.platforms_filter:
+                    continue
 
             # Parse order book JSON
             try:
@@ -419,7 +437,7 @@ class BacktestEngine:
             except json.JSONDecodeError:
                 continue
 
-            order_books[token_id] = {'asks': asks, 'bids': bids}
+            order_books[token_id] = {'asks': asks, 'bids': bids, 'platform': platform}
             token_to_market[token_id] = market_id
 
             # Track tokens per market
@@ -441,7 +459,8 @@ class BacktestEngine:
                 current_capital=capital,
                 cooldown_tracker=cooldown_tracker,
                 current_ts=snapshot['timestamp'],
-                result=result
+                result=result,
+                platform=platform
             )
 
             if trade:
@@ -478,18 +497,24 @@ class BacktestEngine:
         current_capital: float,
         cooldown_tracker: Dict[str, int],
         current_ts: int,
-        result: BacktestResult
+        result: BacktestResult,
+        platform: str = "polymarket"
     ) -> Optional[BacktestTrade]:
         """
-        Check for arbitrage opportunity and simulate trade.
+        Check for arbitrage opportunity and simulate trade using market metadata.
         """
-        # Get token IDs for this market
-        tokens = market_tokens.get(market_id, [])
-        if len(tokens) < 2:
-            return None  # Need both YES and NO tokens
-
-        yes_token = tokens[0]
-        no_token = tokens[1]
+        # PHASE 4: Use market metadata for accurate token mapping
+        metadata = self.data_collector.get_market_metadata(market_id)
+        if not metadata or not metadata.get('yes_token_id') or not metadata.get('no_token_id'):
+            # Fallback to order in market_tokens if metadata missing
+            tokens = market_tokens.get(market_id, [])
+            if len(tokens) < 2:
+                return None
+            yes_token = tokens[0]
+            no_token = tokens[1]
+        else:
+            yes_token = metadata['yes_token_id']
+            no_token = metadata['no_token_id']
 
         # Get order books
         yes_asks = order_books.get(yes_token, {}).get('asks', [])
@@ -505,7 +530,10 @@ class BacktestEngine:
             return None
 
         # Calculate optimal trade using market impact calculator
+        # Sync with MIN_PROFIT_MARGIN from config
         target_cost = 1.0 - config.min_profit_margin
+        
+        # Use capital_per_trade for max shares calculation
         max_shares = config.capital_per_trade / 0.5  # Approximate max shares
 
         optimal_shares, eff_yes, eff_no = self.find_optimal_trade_size(
@@ -545,7 +573,8 @@ class BacktestEngine:
             expected_pnl=expected_pnl,
             roi=roi,
             levels_yes=yes_result.levels_consumed,
-            levels_no=no_result.levels_consumed
+            levels_no=no_result.levels_consumed,
+            platform=platform
         )
 
     def cancel(self):

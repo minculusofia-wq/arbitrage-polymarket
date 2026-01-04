@@ -420,6 +420,7 @@ class ArbitrageBot:
             logger.info("Clob Client initialized successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize Clob Client: {e}")
+            logger.error(f"Debug Info - PK Check: {bool(config.PRIVATE_KEY)} (len: {len(config.PRIVATE_KEY) if config.PRIVATE_KEY else 0})")
             self.client = None
 
         self.simulated_balance = config.FALLBACK_BALANCE  # Fallback if API fails to read balance
@@ -542,6 +543,10 @@ class ArbitrageBot:
         Fetches active markets to monitor.
         Filters by volume and categories.
         """
+        if not self.client:
+            logger.error("Cannot fetch markets: Clob Client not initialized. Check your credentials/Private Key.")
+            return
+            
         logger.info("Fetching markets...")
         try:
             # PHASE 2: Rate limit API calls
@@ -1173,6 +1178,11 @@ class ArbitrageBot:
         while self.running:
             try:
                 await self.connect_and_listen()
+
+                # If no markets were found, wait a bit before retrying fetch or connecting
+                if not self.markets_whitelist:
+                    await asyncio.sleep(10)
+                    await self.fetch_markets()
 
                 # If connect_and_listen returns normally, reset attempts
                 self.reconnect_attempts = 0

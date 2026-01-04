@@ -1,13 +1,21 @@
-# Polymarket Arbitrage Bot
+# Multi-Platform Arbitrage Bot
 
-A professional-grade arbitrage trading bot for Polymarket prediction markets. Automatically detects and executes profitable opportunities when YES + NO prices fall below 1.0.
+A professional-grade arbitrage trading bot for prediction markets. Supports **Polymarket** and **Kalshi** with cross-platform arbitrage detection.
 
 ![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)
 ![PySide6](https://img.shields.io/badge/GUI-PySide6-green.svg)
-![Tests](https://img.shields.io/badge/Tests-298%20passed-brightgreen.svg)
+![Tests](https://img.shields.io/badge/Tests-372%20passed-brightgreen.svg)
 ![License](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 ## Features
+
+### Multi-Platform Support (Phase 6 - NEW)
+- **Polymarket Integration** - Full CLOB API support with WebSocket order books
+- **Kalshi Integration** - REST API support for US-regulated prediction markets
+- **Cross-Platform Arbitrage** - Detects price discrepancies between platforms on similar markets
+- **Market Matching** - Automatic question similarity matching (80%+ threshold)
+- **Unified Interface** - Abstract IExchangeClient interface for platform-agnostic trading
+- **Credentials Panel** - Tabbed UI for managing API credentials for each platform
 
 ### Core Trading
 - **Real-time Market Monitoring** - WebSocket connection to Polymarket order books
@@ -115,12 +123,34 @@ Double-click `Start_Bot.command` in Finder - it handles everything automatically
 
 Edit `.env` or configure directly in the application:
 
+### Polymarket Credentials
+
 | Parameter | Description | Example |
 |-----------|-------------|---------|
 | `POLY_API_KEY` | Polymarket API Key | `your_api_key` |
 | `POLY_API_SECRET` | Polymarket API Secret | `your_secret` |
 | `POLY_API_PASSPHRASE` | Polymarket Passphrase | `your_passphrase` |
 | `PRIVATE_KEY` | Wallet private key for signing | `0x...` |
+
+### Kalshi Credentials (Optional)
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `KALSHI_EMAIL` | Kalshi account email | `user@example.com` |
+| `KALSHI_PASSWORD` | Kalshi account password | `your_password` |
+| `KALSHI_API_KEY` | Kalshi API key (optional) | `your_api_key` |
+
+### Multi-Platform Settings
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `ENABLED_PLATFORMS` | Comma-separated platforms | `polymarket,kalshi` |
+| `CROSS_PLATFORM_ARBITRAGE` | Enable cross-platform detection | `true` |
+
+### Trading Parameters
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
 | `CAPITAL_PER_TRADE` | USDC amount per trade | `10.0` |
 | `MIN_PROFIT_MARGIN` | Minimum profit margin (0-1) | `0.02` (2%) |
 | `MIN_MARKET_VOLUME` | Minimum market volume filter | `5000` |
@@ -176,6 +206,16 @@ arbitrage-poly/
 │   ├── arbitrage.py      # Main bot engine + all optimizations
 │   ├── config.py         # Configuration management
 │   ├── logger.py         # Logging setup
+│   ├── multi_platform_arbitrage.py  # Cross-platform arbitrage detection
+│   │
+│   ├── interfaces/       # Abstract interfaces (Phase 6)
+│   │   ├── exchange_client.py    # IExchangeClient, UnifiedMarket, UnifiedOrderBook
+│   │   └── credentials.py        # IPlatformCredentials, CredentialsManager
+│   │
+│   ├── clients/          # Platform-specific clients (Phase 6)
+│   │   ├── polymarket_client.py  # Polymarket CLOB API wrapper
+│   │   └── kalshi_client.py      # Kalshi REST API client
+│   │
 │   ├── services/         # Modular services
 │   │   ├── market_scorer.py      # Market quality scoring
 │   │   ├── trade_storage.py      # SQLite trade persistence
@@ -187,6 +227,7 @@ arbitrage-poly/
 │   │   ├── backtest_engine.py    # Historical replay engine
 │   │   ├── capital_allocator.py  # Dynamic capital allocation
 │   │   └── time_patterns.py      # Time-based trading patterns
+│   │
 │   └── models/           # Data models
 │       ├── order_book.py      # Optimized with SortedDict
 │       └── trade.py
@@ -195,13 +236,17 @@ arbitrage-poly/
 │   ├── main_window.py    # Main application window
 │   ├── styles.py         # Dark theme styling
 │   └── components/
-│       ├── config_widget.py    # Configuration form
-│       ├── market_monitor.py   # Live market table
-│       ├── pnl_dashboard.py    # P&L performance dashboard
-│       ├── trade_history.py    # Trade history + CSV export
-│       └── backtest_widget.py  # Backtest GUI dashboard
+│       ├── config_widget.py       # Configuration form
+│       ├── credentials_panel.py   # Multi-platform credentials (Phase 6)
+│       ├── market_monitor.py      # Live market table
+│       ├── pnl_dashboard.py       # P&L performance dashboard
+│       ├── trade_history.py       # Trade history + CSV export
+│       └── backtest_widget.py     # Backtest GUI dashboard
 │
-├── tests/                 # Unit tests (298 tests)
+├── tests/                 # Unit tests (372 tests)
+│   ├── test_interfaces.py         # Interface tests (Phase 6)
+│   ├── test_clients.py            # Client tests (Phase 6)
+│   ├── test_multi_platform_arbitrage.py  # Cross-platform tests (Phase 6)
 │   ├── test_market_impact.py
 │   ├── test_market_scorer.py
 │   ├── test_slippage.py
@@ -295,7 +340,10 @@ prices across order book depth before trading.
 python3.11 -m pytest tests/ -v
 ```
 
-298 tests covering:
+372 tests covering:
+- **Multi-platform interfaces** (Phase 6)
+- **Exchange clients** (Phase 6)
+- **Cross-platform arbitrage** (Phase 6)
 - Market impact calculation
 - Slippage protection
 - Cooldown management

@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 class Snapshot:
     """Order book snapshot record."""
     timestamp: int  # Unix timestamp in milliseconds
+    platform: str  # 'polymarket' or 'kalshi'
     token_id: str
     market_id: str
     asks_json: str
@@ -105,11 +106,12 @@ class DataCollector:
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
 
-            # Order book snapshots table
+            # Order book snapshots table with platform support
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS order_book_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp INTEGER NOT NULL,
+                    platform TEXT NOT NULL DEFAULT 'polymarket',
                     token_id TEXT NOT NULL,
                     market_id TEXT NOT NULL,
                     asks_json TEXT NOT NULL,
@@ -119,6 +121,12 @@ class DataCollector:
                     spread REAL
                 )
             """)
+
+            # Migration: Add platform column if it doesn't exist
+            try:
+                conn.execute("ALTER TABLE order_book_snapshots ADD COLUMN platform TEXT DEFAULT 'polymarket'")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
             # Indexes for efficient querying
             conn.execute("""
@@ -132,6 +140,10 @@ class DataCollector:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_snapshots_token_time
                 ON order_book_snapshots(token_id, timestamp)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_snapshots_platform
+                ON order_book_snapshots(platform)
             """)
 
             # Market metadata table
@@ -179,7 +191,8 @@ class DataCollector:
         token_id: str,
         market_id: str,
         order_book: Dict,
-        force: bool = False
+        force: bool = False,
+        platform: str = "polymarket"
     ) -> bool:
         """
         Capture an order book snapshot if interval has elapsed.
@@ -191,6 +204,7 @@ class DataCollector:
             market_id: Market identifier
             order_book: Dict with 'asks' and 'bids' lists
             force: Force capture regardless of interval
+            platform: Platform name ('polymarket' or 'kalshi')
 
         Returns:
             True if snapshot was captured
@@ -199,7 +213,8 @@ class DataCollector:
             return False
 
         now = int(time.time() * 1000)
-        last = self._last_snapshot.get(token_id, 0)
+        cache_key = f"{platform}:{token_id}"
+        last = self._last_snapshot.get(cache_key, 0)
 
         if not force and (now - last) < self.snapshot_interval_ms:
             return False
@@ -229,6 +244,7 @@ class DataCollector:
 
         snapshot = Snapshot(
             timestamp=now,
+            platform=platform,
             token_id=token_id,
             market_id=market_id,
             asks_json=json.dumps(asks),
@@ -239,7 +255,7 @@ class DataCollector:
         )
 
         self._snapshot_buffer.append(snapshot)
-        self._last_snapshot[token_id] = now
+        self._last_snapshot[cache_key] = now
         self.stats['snapshots_captured'] += 1
 
         return True
@@ -342,11 +358,11 @@ class DataCollector:
         with sqlite3.connect(self.db_path) as conn:
             conn.executemany("""
                 INSERT INTO order_book_snapshots
-                (timestamp, token_id, market_id, asks_json, bids_json,
+                (timestamp, platform, token_id, market_id, asks_json, bids_json,
                  best_ask, best_bid, spread)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [(
-                s.timestamp, s.token_id, s.market_id,
+                s.timestamp, s.platform, s.token_id, s.market_id,
                 s.asks_json, s.bids_json,
                 s.best_ask, s.best_bid, s.spread
             ) for s in batch])
@@ -422,6 +438,7 @@ class DataCollector:
         start_ts: int,
         end_ts: int,
         market_id: Optional[str] = None,
+        platform: Optional[str] = None,
         limit: int = 100000
     ) -> List[Dict]:
         """
@@ -431,6 +448,7 @@ class DataCollector:
             start_ts: Start timestamp (ms)
             end_ts: End timestamp (ms)
             market_id: Optional market filter
+            platform: Optional platform filter ('polymarket' or 'kalshi')
             limit: Maximum records to return
 
         Returns:
@@ -439,21 +457,21 @@ class DataCollector:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
 
-            if market_id:
-                cursor = conn.execute("""
-                    SELECT * FROM order_book_snapshots
-                    WHERE timestamp >= ? AND timestamp <= ? AND market_id = ?
-                    ORDER BY timestamp ASC
-                    LIMIT ?
-                """, (start_ts, end_ts, market_id, limit))
-            else:
-                cursor = conn.execute("""
-                    SELECT * FROM order_book_snapshots
-                    WHERE timestamp >= ? AND timestamp <= ?
-                    ORDER BY timestamp ASC
-                    LIMIT ?
-                """, (start_ts, end_ts, limit))
+            query = "SELECT * FROM order_book_snapshots WHERE timestamp >= ? AND timestamp <= ?"
+            params = [start_ts, end_ts]
 
+            if market_id:
+                query += " AND market_id = ?"
+                params.append(market_id)
+
+            if platform:
+                query += " AND platform = ?"
+                params.append(platform)
+
+            query += " ORDER BY timestamp ASC LIMIT ?"
+            params.append(limit)
+
+            cursor = conn.execute(query, params)
             return [dict(row) for row in cursor.fetchall()]
 
     def get_opportunities_for_period(
@@ -600,3 +618,13 @@ class DataCollector:
         # VACUUM must be run outside of transaction
         with sqlite3.connect(self.db_path, isolation_level=None) as conn:
             conn.execute("VACUUM")
+    def get_market_metadata(self, market_id: str) -> Optional[Dict]:
+        """Retrieve metadata for a specific market."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                "SELECT * FROM markets_metadata WHERE condition_id = ?",
+                (market_id,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None

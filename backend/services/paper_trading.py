@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 class PaperTrade:
     """Simulated trade record."""
     id: int
+    platform: str  # 'polymarket' or 'kalshi'
     market_id: str
     yes_token: str
     no_token: str
@@ -41,6 +42,7 @@ class PaperTrade:
         """Convert to dictionary for storage/display."""
         return {
             'id': self.id,
+            'platform': self.platform,
             'market_id': self.market_id,
             'yes_token': self.yes_token,
             'no_token': self.no_token,
@@ -76,10 +78,22 @@ class ITradeExecutor(ABC):
         price_yes: float,
         price_no: float,
         levels_yes: int = 0,
-        levels_no: int = 0
+        levels_no: int = 0,
+        platform: str = "polymarket"
     ) -> Dict[str, Any]:
         """
         Execute a trade and return result.
+
+        Args:
+            market_id: Market identifier
+            yes_token: YES token identifier
+            no_token: NO token identifier
+            shares: Number of shares
+            price_yes: YES price
+            price_no: NO price
+            levels_yes: Order book levels consumed for YES
+            levels_no: Order book levels consumed for NO
+            platform: Platform name ('polymarket' or 'kalshi')
 
         Returns:
             Dict with keys:
@@ -96,8 +110,13 @@ class ITradeExecutor(ABC):
         pass
 
     @abstractmethod
-    def get_balance(self) -> float:
-        """Return current balance (virtual for paper, real for live)."""
+    def get_balance(self, platform: str = None) -> float:
+        """
+        Return current balance (virtual for paper, real for live).
+
+        Args:
+            platform: Optional platform name for multi-platform support
+        """
         pass
 
 
@@ -131,7 +150,8 @@ class LiveTradeExecutor(ITradeExecutor):
         price_yes: float,
         price_no: float,
         levels_yes: int = 0,
-        levels_no: int = 0
+        levels_no: int = 0,
+        platform: str = "polymarket"
     ) -> Dict[str, Any]:
         """Execute real trade via Polymarket API."""
         try:
@@ -159,6 +179,7 @@ class LiveTradeExecutor(ITradeExecutor):
                 "success": True,
                 "mode": "LIVE",
                 "trade": {
+                    "platform": platform,
                     "market_id": market_id,
                     "yes_token": yes_token,
                     "no_token": no_token,
@@ -181,7 +202,7 @@ class LiveTradeExecutor(ITradeExecutor):
     def get_mode(self) -> str:
         return "LIVE"
 
-    def get_balance(self) -> float:
+    def get_balance(self, platform: str = None) -> float:
         return self._balance
 
     def set_balance(self, balance: float):
@@ -231,11 +252,12 @@ class PaperTradeExecutor(ITradeExecutor):
         self._load_state()
 
     def _init_db(self):
-        """Create paper trades table."""
+        """Create paper trades table with platform support."""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS paper_trades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    platform TEXT DEFAULT 'polymarket',
                     market_id TEXT NOT NULL,
                     yes_token TEXT,
                     no_token TEXT,
@@ -268,6 +290,16 @@ class PaperTradeExecutor(ITradeExecutor):
                 CREATE INDEX IF NOT EXISTS idx_paper_trades_market
                 ON paper_trades(market_id)
             """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_paper_trades_platform
+                ON paper_trades(platform)
+            """)
+
+            # Migration: Add platform column if missing
+            try:
+                conn.execute("ALTER TABLE paper_trades ADD COLUMN platform TEXT DEFAULT 'polymarket'")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
     def _load_state(self):
         """Load previous state from database."""
@@ -301,7 +333,8 @@ class PaperTradeExecutor(ITradeExecutor):
         price_yes: float,
         price_no: float,
         levels_yes: int = 0,
-        levels_no: int = 0
+        levels_no: int = 0,
+        platform: str = "polymarket"
     ) -> Dict[str, Any]:
         """
         Simulate trade execution with realistic fill modeling.
@@ -314,7 +347,7 @@ class PaperTradeExecutor(ITradeExecutor):
         """
         # Simulate fill probability
         if random.random() > self.fill_probability:
-            logger.info(f"[PAPER] Simulated no-fill for {market_id}")
+            logger.info(f"[PAPER] Simulated no-fill for {platform}:{market_id}")
             return {
                 "success": False,
                 "reason": "SIMULATED_NO_FILL",
@@ -350,6 +383,7 @@ class PaperTradeExecutor(ITradeExecutor):
         self._trade_count += 1
         trade = PaperTrade(
             id=self._trade_count,
+            platform=platform,
             market_id=market_id,
             yes_token=yes_token,
             no_token=no_token,
@@ -371,7 +405,7 @@ class PaperTradeExecutor(ITradeExecutor):
 
         self.positions.append(trade)
 
-        logger.info(f"[PAPER] Executed trade: {shares:.1f} shares @ ${entry_cost:.2f}, P&L: ${expected_pnl:.2f} ({roi:.2f}%)")
+        logger.info(f"[PAPER][{platform.upper()}] Executed trade: {shares:.1f} shares @ ${entry_cost:.2f}, P&L: ${expected_pnl:.2f} ({roi:.2f}%)")
 
         return {
             "success": True,
@@ -385,11 +419,12 @@ class PaperTradeExecutor(ITradeExecutor):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 INSERT INTO paper_trades
-                (market_id, yes_token, no_token, shares, yes_price, no_price,
+                (platform, market_id, yes_token, no_token, shares, yes_price, no_price,
                  entry_cost, expected_pnl, roi, timestamp, status,
                  levels_yes, levels_no, virtual_balance_after)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
+                trade.platform,
                 trade.market_id,
                 trade.yes_token,
                 trade.no_token,
@@ -409,7 +444,8 @@ class PaperTradeExecutor(ITradeExecutor):
     def get_mode(self) -> str:
         return "PAPER"
 
-    def get_balance(self) -> float:
+    def get_balance(self, platform: str = None) -> float:
+        """Get virtual balance. Platform parameter ignored for shared balance."""
         return self.virtual_balance
 
     def get_trades(self, limit: int = 100, offset: int = 0) -> List[Dict]:
