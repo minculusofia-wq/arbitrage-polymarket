@@ -10,15 +10,45 @@ from backend.interfaces.exchange_client import (
 )
 
 
+# Sample RSA private key for testing (DO NOT USE IN PRODUCTION)
+TEST_RSA_PRIVATE_KEY = """-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEArIygrikSF2rjREcDowOs6H4+yZhHwK9penm+a3jSgFZpBXtJ
+p/8RVNqMlfwWtitFE5Vsj5c/4dNVjBBcuLf81FrsjCEiipRfbWZj9+Okwq+M9Aam
+skDdP1qdEUaZA3vc5d2yZx4PpMx9fqf4xWlhtd2Ju1UAazqERDt7TQo646Chm1Bl
+OaLpdcdt+Rt/tE3Wz9BR7FTs5eWRnRktvkrlaV23Y2VW+2PwQU62apJ9BDufRMhg
+FS9cwNhX1e0Vs5lrmbsRYpZ+MkKcTQk9dJq51JDiGUJ239v6eDqPdK8cOFo+dV5z
+wrhMvPQummwbCR710YTRj592twM1UEQ6jw0WVwIDAQABAoIBADlN1ssgPq7iQ6nY
+P7/yp4jq7GU9Go9GcixHpFLC5H3UtLoqULLnRdU9Y7Un7E8BncY8OLqTS5bu/Zkv
+keuSxverXqXHF1aYofyOJaMcygoSDSi50MCgRBoXONSU8poyl5ELiIUweZeMhhz7
+IeZF8jpY4bYCK8pwu56BdpiGTjpsAR7G88c3mj9q1x9Z+hzQtIXtXCOGYqYQDnme
+BplF4obL/7A6NE0G71numMLon//yklXN1QWvj/VIZPdyDvmt9qZmPdJQHQTo9NaR
+CZkkihsAxzA3RXEHROLMsAKliM82jipivNKpm6oM368o4j0/cTc7//mXmzw/oG+S
+/ByG3jkCgYEA54U2Mx57zzKNSsCciY54T0XaMdXUhthrFa/8gMM+9sMpoVYllYhV
+/Hq+OK2Imfpx5IOaFLXvMxM8jhOgDb6xCXt7jLigzJ2LO+PI3Pq7FUE1g9Glhwb6
+BNSkuNzlb4Y1IzHo+NUoh8rCb6WrofBq3c3tp7L/O8n+zWLO4L1knE0CgYEAvssw
+dGUMhtlkPTxpWWjnNyxoZ3kMmYSVfr29k85zf7/BkMkc7xVSALQiS+uflTzUEKLn
+Sgxzdgn1q6BqDgRmJocPg89+OR08+O9E6kEJuXJgq7KDMaPr+FHnOMc3sOXbsgSO
+jeg6dKag/nt0lHQQDjJRgaiAan47hsPi8/E3PzMCgYBQ+OUo4ct5fvutnknhTkPD
+rfGPJnMrKjvhnOhZ/G9kDIPd2mxQrRstr5wh5Id3GwGEY4abIbpkCaFPK4v54qy2
+XUqrv9L1XVBaBOO2bbbKy0C1NriGzijZUam+wfs4kx64jXcmuB5xx7dTJwUtIRGv
+O5uX4GGl/pKwMJOcRIEQrQKBgQCHb8Fzvo+H4iXv+kRmfbs0RUfPu/QfvihJEfPT
+SohetQZ4+uqZJS9S5Iw8DIT58XYwYROCUxhbQHKuZG8kiCbjTpjK3q4haQnxRBhN
+meGHTRQmjc/nmw9U9P8IJRL5dhHgaq+vOJzWVbqPK5/0CfejvEBzo+OUtQsYfVFM
+DX1EVQKBgEWilB3f7AwI/i96sMQC/MNufRCuGKsxNfBK5iPFUo6H+E8apjHvdpQ7
+Wp7mz1ACSAyZAybqjzXk28uW4ELZYW0N823R+a4nK02tDoJHrJOTcOeGx+92rgDO
+XVB9s/g/X4t5/hD9JQALylqGDKpHg0s/GhUxJ3NNG9WKAZFVozon
+-----END RSA PRIVATE KEY-----"""
+
+
 class TestKalshiClient:
     """Tests for KalshiClient."""
 
     @pytest.fixture
     def credentials(self):
-        """Create test credentials."""
+        """Create test credentials with RSA key."""
         return KalshiCredentials(
-            email="test@example.com",
-            password="password123"
+            api_key_id="test_api_key_id",
+            private_key_pem=TEST_RSA_PRIVATE_KEY
         )
 
     @pytest.fixture
@@ -39,7 +69,7 @@ class TestKalshiClient:
     @pytest.mark.asyncio
     async def test_connect_invalid_credentials(self):
         """Test connection with invalid credentials."""
-        creds = KalshiCredentials(email="", password="")
+        creds = KalshiCredentials(api_key_id="", private_key_pem="")
         client = KalshiClient(creds, use_demo=True)
         result = await client.connect()
         assert result is False
@@ -48,54 +78,71 @@ class TestKalshiClient:
     @pytest.mark.asyncio
     async def test_connect_mock_success(self, client):
         """Test successful connection with mocked response."""
-        mock_response = AsyncMock()
-        mock_response.status = 200
-        mock_response.json = AsyncMock(return_value={
-            "token": "test_token_123",
-            "member_id": "member_123"
-        })
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.backends import default_backend
 
-        with patch('aiohttp.ClientSession') as mock_session:
-            instance = AsyncMock()
-            instance.post = MagicMock(return_value=AsyncMock(
-                __aenter__=AsyncMock(return_value=mock_response),
-                __aexit__=AsyncMock()
-            ))
-            mock_session.return_value = instance
-            client._session = instance
+        # Load the private key
+        private_key = serialization.load_pem_private_key(
+            TEST_RSA_PRIVATE_KEY.encode(),
+            password=None,
+            backend=default_backend()
+        )
 
-            # Simulate successful auth
-            client._token = "test_token_123"
-            client._connected = True
+        # Simulate successful auth by setting internal state
+        client._private_key = private_key
+        client._api_key_id = "test_api_key_id"
+        client._session = AsyncMock()
+        client._connected = True
 
         assert client.is_connected is True
 
     @pytest.mark.asyncio
     async def test_disconnect(self, client):
         """Test disconnection."""
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.backends import default_backend
+
+        private_key = serialization.load_pem_private_key(
+            TEST_RSA_PRIVATE_KEY.encode(),
+            password=None,
+            backend=default_backend()
+        )
+
         client._connected = True
-        client._token = "token"
+        client._private_key = private_key
+        client._api_key_id = "test_key"
         client._session = AsyncMock()
         client._session.close = AsyncMock()
 
         await client.disconnect()
 
         assert client.is_connected is False
-        assert client._token is None
+        assert client._private_key is None
 
-    def test_get_headers_with_token(self, client):
-        """Test header generation with token."""
-        client._token = "test_token"
-        headers = client._get_headers()
+    def test_get_headers_with_key(self, client):
+        """Test header generation with RSA key."""
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.backends import default_backend
+
+        private_key = serialization.load_pem_private_key(
+            TEST_RSA_PRIVATE_KEY.encode(),
+            password=None,
+            backend=default_backend()
+        )
+
+        client._private_key = private_key
+        client._api_key_id = "test_api_key"
+        headers = client._get_headers("GET", "/trade-api/v2/markets")
 
         assert headers["Content-Type"] == "application/json"
-        assert "Authorization" in headers
-        assert "Bearer test_token" in headers["Authorization"]
+        assert "KALSHI-ACCESS-KEY" in headers
+        assert "KALSHI-ACCESS-SIGNATURE" in headers
+        assert "KALSHI-ACCESS-TIMESTAMP" in headers
 
-    def test_get_headers_without_token(self, client):
-        """Test header generation without token."""
+    def test_get_headers_without_key(self, client):
+        """Test header generation without key."""
         headers = client._get_headers()
-        assert "Authorization" not in headers
+        assert "KALSHI-ACCESS-KEY" not in headers
 
     @pytest.mark.asyncio
     async def test_fetch_markets_not_connected(self, client):
@@ -147,10 +194,25 @@ class TestKalshiClientMocked:
     @pytest.fixture
     def connected_client(self):
         """Create a mocked connected client."""
-        creds = KalshiCredentials(email="test@example.com", password="password123")
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.backends import default_backend
+
+        creds = KalshiCredentials(
+            api_key_id="test_api_key_id",
+            private_key_pem=TEST_RSA_PRIVATE_KEY
+        )
         client = KalshiClient(creds, use_demo=True)
+
+        # Load the private key for mocking
+        private_key = serialization.load_pem_private_key(
+            TEST_RSA_PRIVATE_KEY.encode(),
+            password=None,
+            backend=default_backend()
+        )
+
         client._connected = True
-        client._token = "test_token"
+        client._private_key = private_key
+        client._api_key_id = "test_api_key_id"
         client._session = AsyncMock()
         return client
 

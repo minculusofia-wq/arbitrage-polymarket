@@ -267,82 +267,112 @@ class TestPolymarketCredentials:
         assert incomplete.is_complete() is False
 
 
+TEST_RSA_PRIVATE_KEY_PEM = """-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEArIygrikSF2rjREcDowOs6H4+yZhHwK9penm+a3jSgFZpBXtJ
+p/8RVNqMlfwWtitFE5Vsj5c/4dNVjBBcuLf81FrsjCEiipRfbWZj9+Okwq+M9Aam
+skDdP1qdEUaZA3vc5d2yZx4PpMx9fqf4xWlhtd2Ju1UAazqERDt7TQo646Chm1Bl
+OaLpdcdt+Rt/tE3Wz9BR7FTs5eWRnRktvkrlaV23Y2VW+2PwQU62apJ9BDufRMhg
+FS9cwNhX1e0Vs5lrmbsRYpZ+MkKcTQk9dJq51JDiGUJ239v6eDqPdK8cOFo+dV5z
+wrhMvPQummwbCR710YTRj592twM1UEQ6jw0WVwIDAQABAoIBADlN1ssgPq7iQ6nY
+P7/yp4jq7GU9Go9GcixHpFLC5H3UtLoqULLnRdU9Y7Un7E8BncY8OLqTS5bu/Zkv
+keuSxverXqXHF1aYofyOJaMcygoSDSi50MCgRBoXONSU8poyl5ELiIUweZeMhhz7
+IeZF8jpY4bYCK8pwu56BdpiGTjpsAR7G88c3mj9q1x9Z+hzQtIXtXCOGYqYQDnme
+BplF4obL/7A6NE0G71numMLon//yklXN1QWvj/VIZPdyDvmt9qZmPdJQHQTo9NaR
+CZkkihsAxzA3RXEHROLMsAKliM82jipivNKpm6oM368o4j0/cTc7//mXmzw/oG+S
+/ByG3jkCgYEA54U2Mx57zzKNSsCciY54T0XaMdXUhthrFa/8gMM+9sMpoVYllYhV
+/Hq+OK2Imfpx5IOaFLXvMxM8jhOgDb6xCXt7jLigzJ2LO+PI3Pq7FUE1g9Glhwb6
+BNSkuNzlb4Y1IzHo+NUoh8rCb6WrofBq3c3tp7L/O8n+zWLO4L1knE0CgYEAvssw
+dGUMhtlkPTxpWWjnNyxoZ3kMmYSVfr29k85zf7/BkMkc7xVSALQiS+uflTzUEKLn
+Sgxzdgn1q6BqDgRmJocPg89+OR08+O9E6kEJuXJgq7KDMaPr+FHnOMc3sOXbsgSO
+jeg6dKag/nt0lHQQDjJRgaiAan47hsPi8/E3PzMCgYBQ+OUo4ct5fvutnknhTkPD
+rfGPJnMrKjvhnOhZ/G9kDIPd2mxQrRstr5wh5Id3GwGEY4abIbpkCaFPK4v54qy2
+XUqrv9L1XVBaBOO2bbbKy0C1NriGzijZUam+wfs4kx64jXcmuB5xx7dTJwUtIRGv
+O5uX4GGl/pKwMJOcRIEQrQKBgQCHb8Fzvo+H4iXv+kRmfbs0RUfPu/QfvihJEfPT
+SohetQZ4+uqZJS9S5Iw8DIT58XYwYROCUxhbQHKuZG8kiCbjTpjK3q4haQnxRBhN
+meGHTRQmjc/nmw9U9P8IJRL5dhHgaq+vOJzWVbqPK5/0CfejvEBzo+OUtQsYfVFM
+DX1EVQKBgEWilB3f7AwI/i96sMQC/MNufRCuGKsxNfBK5iPFUo6H+E8apjHvdpQ7
+Wp7mz1ACSAyZAybqjzXk28uW4ELZYW0N823R+a4nK02tDoJHrJOTcOeGx+92rgDO
+XVB9s/g/X4t5/hD9JQALylqGDKpHg0s/GhUxJ3NNG9WKAZFVozon
+-----END RSA PRIVATE KEY-----"""
+
+
 class TestKalshiCredentials:
-    """Tests for KalshiCredentials."""
+    """Tests for KalshiCredentials with RSA-PSS authentication."""
 
     def test_valid_credentials(self):
         creds = KalshiCredentials(
-            email="test@example.com",
-            password="password123"
+            api_key_id="test_api_key_id",
+            private_key_pem=TEST_RSA_PRIVATE_KEY_PEM
         )
         assert creds.platform_name == "kalshi"
         is_valid, error = creds.validate()
         assert is_valid is True
         assert error == ""
 
-    def test_missing_email(self):
+    def test_missing_api_key_id(self):
         creds = KalshiCredentials(
-            email="",
-            password="password123"
+            api_key_id="",
+            private_key_pem=TEST_RSA_PRIVATE_KEY_PEM
         )
         is_valid, error = creds.validate()
         assert is_valid is False
-        assert "email" in error.lower()
+        assert "API Key ID" in error
 
-    def test_invalid_email_format(self):
+    def test_missing_private_key(self):
         creds = KalshiCredentials(
-            email="not_an_email",
-            password="password123"
+            api_key_id="test_api_key",
+            private_key_pem=""
         )
         is_valid, error = creds.validate()
         assert is_valid is False
-        assert "email format" in error.lower()
+        assert "private key" in error.lower()
 
-    def test_password_too_short(self):
+    def test_invalid_pem_format(self):
         creds = KalshiCredentials(
-            email="test@example.com",
-            password="12345"
+            api_key_id="test_api_key",
+            private_key_pem="not_a_valid_pem"
         )
         is_valid, error = creds.validate()
         assert is_valid is False
-        assert "6 characters" in error.lower()
+        assert "PEM" in error
 
-    def test_with_api_key(self):
+    def test_to_client_kwargs(self):
         creds = KalshiCredentials(
-            email="test@example.com",
-            password="password123",
-            api_key="api_key_123"
+            api_key_id="test_api_key_id",
+            private_key_pem=TEST_RSA_PRIVATE_KEY_PEM
         )
         kwargs = creds.to_client_kwargs()
-        assert kwargs["api_key"] == "api_key_123"
+        assert kwargs["api_key_id"] == "test_api_key_id"
+        assert "-----BEGIN RSA PRIVATE KEY-----" in kwargs["private_key_pem"]
 
     def test_from_env(self):
         env = {
-            "KALSHI_EMAIL": "test@example.com",
-            "KALSHI_PASSWORD": "password123",
-            "KALSHI_API_KEY": "api_123"
+            "KALSHI_API_KEY_ID": "api_key_123",
+            "KALSHI_PRIVATE_KEY_PATH": "",
+            "KALSHI_PRIVATE_KEY_PEM": TEST_RSA_PRIVATE_KEY_PEM
         }
         creds = KalshiCredentials.from_env(env)
-        assert creds.email == "test@example.com"
-        assert creds.api_key == "api_123"
+        assert creds.api_key_id == "api_key_123"
+        assert "BEGIN RSA" in creds.private_key_pem
 
-    def test_from_env_no_api_key(self):
+    def test_from_env_empty_pem(self):
         env = {
-            "KALSHI_EMAIL": "test@example.com",
-            "KALSHI_PASSWORD": "password123",
-            "KALSHI_API_KEY": ""
+            "KALSHI_API_KEY_ID": "api_key_123",
+            "KALSHI_PRIVATE_KEY_PATH": "",
+            "KALSHI_PRIVATE_KEY_PEM": ""
         }
         creds = KalshiCredentials.from_env(env)
-        assert creds.api_key is None
+        assert creds.api_key_id == "api_key_123"
+        assert creds.private_key_pem == ""
 
     def test_is_complete(self):
         complete = KalshiCredentials(
-            email="test@example.com",
-            password="password123"
+            api_key_id="test_api_key",
+            private_key_pem=TEST_RSA_PRIVATE_KEY_PEM
         )
         assert complete.is_complete() is True
 
-        incomplete = KalshiCredentials(email="test@example.com")
+        incomplete = KalshiCredentials(api_key_id="test_api_key")
         assert incomplete.is_complete() is False
 
 
@@ -376,8 +406,8 @@ class TestCredentialsManager:
             private_key="0x" + "a" * 64
         )
         kalshi_creds = KalshiCredentials(
-            email="test@example.com",
-            password="password123"
+            api_key_id="test_api_key",
+            private_key_pem=TEST_RSA_PRIVATE_KEY_PEM
         )
         manager.set_credentials(poly_creds)
         manager.set_credentials(kalshi_creds)
@@ -395,8 +425,8 @@ class TestCredentialsManager:
             private_key="0x" + "a" * 64
         )
         kalshi_creds = KalshiCredentials(
-            email="test@example.com",
-            password=""  # Incomplete
+            api_key_id="test_api_key",
+            private_key_pem=""  # Incomplete
         )
         manager.set_credentials(poly_creds)
         manager.set_credentials(kalshi_creds)
@@ -414,15 +444,15 @@ class TestCredentialsManager:
             private_key="0x" + "a" * 64
         )
         kalshi_creds = KalshiCredentials(
-            email="test@example.com",
-            password="password123"
+            api_key_id="test_kalshi_key",
+            private_key_pem=TEST_RSA_PRIVATE_KEY_PEM
         )
         manager.set_credentials(poly_creds)
         manager.set_credentials(kalshi_creds)
 
         env = manager.to_env_dict()
         assert env["POLY_API_KEY"] == "poly_key"
-        assert env["KALSHI_EMAIL"] == "test@example.com"
+        assert env["KALSHI_API_KEY_ID"] == "test_kalshi_key"
         assert "ENABLED_PLATFORMS" in env
 
     def test_from_env(self):
@@ -431,8 +461,9 @@ class TestCredentialsManager:
             "POLY_API_SECRET": "secret",
             "POLY_API_PASSPHRASE": "pass",
             "PRIVATE_KEY": "0x" + "a" * 64,
-            "KALSHI_EMAIL": "test@example.com",
-            "KALSHI_PASSWORD": "password123"
+            "KALSHI_API_KEY_ID": "kalshi_api_key",
+            "KALSHI_PRIVATE_KEY_PATH": "",
+            "KALSHI_PRIVATE_KEY_PEM": TEST_RSA_PRIVATE_KEY_PEM
         }
         manager = CredentialsManager.from_env(env)
 

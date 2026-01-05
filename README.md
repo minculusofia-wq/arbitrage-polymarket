@@ -134,11 +134,12 @@ Edit `.env` or configure directly in the application:
 
 ### Kalshi Credentials (Optional)
 
+Kalshi API v2 uses RSA-PSS authentication. Generate your API key pair at [Kalshi Settings](https://kalshi.com/settings/api).
+
 | Parameter | Description | Example |
 |-----------|-------------|---------|
-| `KALSHI_EMAIL` | Kalshi account email | `user@example.com` |
-| `KALSHI_PASSWORD` | Kalshi account password | `your_password` |
-| `KALSHI_API_KEY` | Kalshi API key (optional) | `your_api_key` |
+| `KALSHI_API_KEY_ID` | API Key ID from Kalshi dashboard | `your_api_key_id` |
+| `KALSHI_PRIVATE_KEY_PATH` | Path to RSA private key PEM file | `~/.kalshi/private_key.pem` |
 
 ### Multi-Platform Settings
 

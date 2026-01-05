@@ -3,13 +3,21 @@ Kalshi Client - Implementation of IExchangeClient for Kalshi.
 
 This client provides async access to the Kalshi Trading API v2
 for prediction market trading.
+
+Uses RSA-PSS authentication as per Kalshi API v2 specification.
 """
 
 import asyncio
 import aiohttp
 import time
+import base64
 import logging
+from datetime import datetime, timezone
 from typing import List, Optional, Dict
+
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.backends import default_backend
 
 from backend.interfaces.exchange_client import (
     IExchangeClient,
@@ -31,7 +39,7 @@ class KalshiClient(IExchangeClient):
     """
     Kalshi exchange client implementing IExchangeClient interface.
 
-    Uses the Kalshi Trading API v2 for market data and order execution.
+    Uses the Kalshi Trading API v2 with RSA-PSS authentication.
     """
 
     BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
@@ -42,14 +50,14 @@ class KalshiClient(IExchangeClient):
         Initialize Kalshi client.
 
         Args:
-            credentials: KalshiCredentials object with email/password
+            credentials: KalshiCredentials object with API key ID and RSA private key
             use_demo: If True, use demo environment
         """
         self.credentials = credentials
         self.base_url = self.DEMO_URL if use_demo else self.BASE_URL
         self._session: Optional[aiohttp.ClientSession] = None
-        self._token: Optional[str] = None
-        self._member_id: Optional[str] = None
+        self._private_key = None
+        self._api_key_id: Optional[str] = None
         self._connected = False
         self._markets_cache: Dict[str, UnifiedMarket] = {}
         self._last_markets_fetch: float = 0
@@ -61,10 +69,43 @@ class KalshiClient(IExchangeClient):
 
     @property
     def is_connected(self) -> bool:
-        return self._connected and self._session is not None and self._token is not None
+        return self._connected and self._session is not None and self._private_key is not None
+
+    def _sign_request(self, method: str, path: str, body: str = "") -> Dict[str, str]:
+        """
+        Generate RSA-PSS signature for Kalshi API authentication.
+
+        Returns headers dict with Authorization header.
+        """
+        # Get current timestamp in ISO 8601 format
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Build message to sign: timestamp + method + path + body
+        message = f"{timestamp}{method}{path}{body}"
+        message_bytes = message.encode('utf-8')
+
+        # Sign with RSA-PSS
+        signature = self._private_key.sign(
+            message_bytes,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+
+        # Base64 encode signature
+        signature_b64 = base64.b64encode(signature).decode('utf-8')
+
+        return {
+            "Content-Type": "application/json",
+            "KALSHI-ACCESS-KEY": self._api_key_id,
+            "KALSHI-ACCESS-SIGNATURE": signature_b64,
+            "KALSHI-ACCESS-TIMESTAMP": timestamp
+        }
 
     async def connect(self) -> bool:
-        """Connect and authenticate to Kalshi API."""
+        """Connect and authenticate to Kalshi API using RSA-PSS."""
         try:
             # Validate credentials first
             is_valid, error = self.credentials.validate()
@@ -72,49 +113,41 @@ class KalshiClient(IExchangeClient):
                 logger.error(f"Invalid Kalshi credentials: {error}")
                 return False
 
+            # Load the RSA private key
+            kwargs = self.credentials.to_client_kwargs()
+            self._api_key_id = kwargs["api_key_id"]
+            pem_data = kwargs["private_key_pem"]
+
+            try:
+                self._private_key = serialization.load_pem_private_key(
+                    pem_data.encode('utf-8'),
+                    password=None,
+                    backend=default_backend()
+                )
+                logger.info("RSA private key loaded successfully")
+            except Exception as e:
+                logger.error(f"Failed to load RSA private key: {e}")
+                return False
+
             # Create aiohttp session with custom SSL context
             connector = aiohttp.TCPConnector(ssl=get_ssl_context())
             self._session = aiohttp.ClientSession(connector=connector)
 
-            # Authenticate
-            auth_data = {
-                "email": self.credentials.email,
-                "password": self.credentials.password
-            }
+            # Test authentication by fetching exchange status
+            test_path = "/trade-api/v2/exchange/status"
+            test_url = f"{self.base_url.replace('/trade-api/v2', '')}{test_path}"
+            headers = self._sign_request("GET", test_path)
 
-            # Try to authenticate with multiple possible endpoints for the new API
-            login_endpoints = [
-                f"{self.base_url}/login",
-                "https://api.elections.kalshi.com/v2/login",
-                "https://api.elections.kalshi.com/trade-api/v2/log_in"
-            ]
-            
-            last_error = ""
-            for auth_url in login_endpoints:
-                try:
-                    logger.info(f"Attempting Kalshi login at {auth_url}...")
-                    async with self._session.post(auth_url, json=auth_data) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            self._token = data.get("token")
-                            self._member_id = data.get("member_id")
-                            self._connected = True
-                            logger.info(f"Kalshi client connected successfully via {auth_url}")
-                            return True
-                        elif resp.status == 404:
-                            logger.warning(f"Kalshi login at {auth_url} returned 404, trying next...")
-                            continue
-                        else:
-                            error_text = await resp.text()
-                            last_error = f"{resp.status} - {error_text}"
-                            logger.error(f"Kalshi authentication failed at {auth_url}: {last_error}")
-                except Exception as e:
-                    logger.error(f"Error during Kalshi login attempt at {auth_url}: {e}")
-                    last_error = str(e)
-
-            logger.error(f"Failed to connect to Kalshi after trying all endpoints. Last error: {last_error}")
-            await self.disconnect()
-            return False
+            async with self._session.get(test_url, headers=headers) as resp:
+                if resp.status == 200:
+                    self._connected = True
+                    logger.info("Kalshi client connected successfully with RSA-PSS auth")
+                    return True
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"Kalshi auth test failed: {resp.status} - {error_text}")
+                    await self.disconnect()
+                    return False
 
         except Exception as e:
             logger.error(f"Unexpected error connecting to Kalshi: {e}")
@@ -126,18 +159,17 @@ class KalshiClient(IExchangeClient):
         if self._session and not self._session.closed:
             await self._session.close()
         self._session = None
-        self._token = None
-        self._member_id = None
+        self._private_key = None
+        self._api_key_id = None
         self._connected = False
         self._markets_cache.clear()
         logger.info("Kalshi client disconnected")
 
-    def _get_headers(self) -> Dict[str, str]:
-        """Get authentication headers."""
-        headers = {"Content-Type": "application/json"}
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
-        return headers
+    def _get_headers(self, method: str = "GET", path: str = "", body: str = "") -> Dict[str, str]:
+        """Get authentication headers with RSA-PSS signature."""
+        if self._private_key and self._api_key_id:
+            return self._sign_request(method, path, body)
+        return {"Content-Type": "application/json"}
 
     async def fetch_markets(
         self,
@@ -163,9 +195,10 @@ class KalshiClient(IExchangeClient):
                 if cursor:
                     params["cursor"] = cursor
 
+                path = "/trade-api/v2/markets"
                 async with self._session.get(
                     url,
-                    headers=self._get_headers(),
+                    headers=self._get_headers("GET", path),
                     params=params
                 ) as resp:
                     if resp.status != 200:
@@ -224,10 +257,11 @@ class KalshiClient(IExchangeClient):
 
         try:
             url = f"{self.base_url}/markets/{market_id}/orderbook"
+            path = f"/trade-api/v2/markets/{market_id}/orderbook"
 
             async with self._session.get(
                 url,
-                headers=self._get_headers()
+                headers=self._get_headers("GET", path)
             ) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
@@ -315,6 +349,7 @@ class KalshiClient(IExchangeClient):
 
         try:
             url = f"{self.base_url}/portfolio/orders"
+            path = "/trade-api/v2/portfolio/orders"
 
             # Convert price to cents
             price_cents = int(price * 100)
@@ -340,9 +375,11 @@ class KalshiClient(IExchangeClient):
                 order_data["sell_position_floor"] = 0
                 order_data["buy_max_cost"] = int(size * price * 100)
 
+            import json
+            body = json.dumps(order_data)
             async with self._session.post(
                 url,
-                headers=self._get_headers(),
+                headers=self._get_headers("POST", path, body),
                 json=order_data
             ) as resp:
                 if resp.status in [200, 201]:
@@ -381,10 +418,11 @@ class KalshiClient(IExchangeClient):
 
         try:
             url = f"{self.base_url}/portfolio/orders/{order_id}"
+            path = f"/trade-api/v2/portfolio/orders/{order_id}"
 
             async with self._session.delete(
                 url,
-                headers=self._get_headers()
+                headers=self._get_headers("DELETE", path)
             ) as resp:
                 return resp.status in [200, 204]
 
@@ -399,10 +437,11 @@ class KalshiClient(IExchangeClient):
 
         try:
             url = f"{self.base_url}/portfolio/balance"
+            path = "/trade-api/v2/portfolio/balance"
 
             async with self._session.get(
                 url,
-                headers=self._get_headers()
+                headers=self._get_headers("GET", path)
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -422,10 +461,11 @@ class KalshiClient(IExchangeClient):
 
         try:
             url = f"{self.base_url}/portfolio/positions"
+            path = "/trade-api/v2/portfolio/positions"
 
             async with self._session.get(
                 url,
-                headers=self._get_headers()
+                headers=self._get_headers("GET", path)
             ) as resp:
                 if resp.status != 200:
                     return []
@@ -479,10 +519,11 @@ class KalshiClient(IExchangeClient):
 
         try:
             url = f"{self.base_url}/markets/{market_id}"
+            path = f"/trade-api/v2/markets/{market_id}"
 
             async with self._session.get(
                 url,
-                headers=self._get_headers()
+                headers=self._get_headers("GET", path)
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -515,10 +556,11 @@ class KalshiClient(IExchangeClient):
 
         try:
             url = f"{self.base_url}/events/{event_ticker}/markets"
+            path = f"/trade-api/v2/events/{event_ticker}/markets"
 
             async with self._session.get(
                 url,
-                headers=self._get_headers()
+                headers=self._get_headers("GET", path)
             ) as resp:
                 if resp.status != 200:
                     return []

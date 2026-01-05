@@ -156,13 +156,14 @@ class KalshiCredentials(IPlatformCredentials):
     """
     Kalshi API credentials.
 
-    Required for:
-    - Email + Password: Primary authentication (gets JWT token)
-    - API Key: Optional, for API v2 direct authentication
+    Required for API v2 RSA-PSS authentication:
+    - api_key_id: The API key ID from Kalshi dashboard
+    - private_key_path: Path to the RSA private key PEM file
+    - private_key_pem: The RSA private key content (alternative to path)
     """
-    email: str = ""
-    password: str = ""
-    api_key: Optional[str] = None
+    api_key_id: str = ""
+    private_key_path: str = ""
+    private_key_pem: str = ""
 
     @property
     def platform_name(self) -> str:
@@ -170,52 +171,65 @@ class KalshiCredentials(IPlatformCredentials):
 
     def validate(self) -> Tuple[bool, str]:
         """Validate Kalshi credentials."""
-        if not self.email:
-            return False, "Missing Kalshi email"
-        if not self.password:
-            return False, "Missing Kalshi password"
+        if not self.api_key_id:
+            return False, "Missing Kalshi API Key ID"
 
-        # Basic email format validation
-        email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-        if not re.match(email_pattern, self.email):
-            return False, "Invalid email format"
+        # Need either path or PEM content
+        if not self.private_key_path and not self.private_key_pem:
+            return False, "Missing Kalshi private key (provide path or PEM content)"
 
-        # Password minimum length
-        if len(self.password) < 6:
-            return False, "Password must be at least 6 characters"
+        # If path provided, check it looks valid
+        if self.private_key_path:
+            import os
+            if not os.path.exists(self.private_key_path):
+                return False, f"Private key file not found: {self.private_key_path}"
+
+        # If PEM content provided, validate format
+        if self.private_key_pem:
+            if "-----BEGIN" not in self.private_key_pem:
+                return False, "Invalid PEM format (missing BEGIN marker)"
+            if "PRIVATE KEY" not in self.private_key_pem:
+                return False, "Invalid PEM format (not a private key)"
 
         return True, ""
 
+    def get_private_key_pem(self) -> str:
+        """Get the private key PEM content."""
+        if self.private_key_pem:
+            return self.private_key_pem
+
+        if self.private_key_path:
+            import os
+            with open(os.path.expanduser(self.private_key_path), 'r') as f:
+                return f.read()
+
+        return ""
+
     def to_client_kwargs(self) -> Dict:
         """Convert to KalshiClient initialization kwargs."""
-        kwargs = {
-            "email": self.email.strip(),
-            "password": self.password.strip()
+        return {
+            "api_key_id": self.api_key_id.strip(),
+            "private_key_pem": self.get_private_key_pem()
         }
-        if self.api_key:
-            kwargs["api_key"] = self.api_key.strip()
-        return kwargs
 
     def to_env_dict(self) -> Dict[str, str]:
         """Convert to .env format."""
         return {
-            "KALSHI_EMAIL": self.email,
-            "KALSHI_PASSWORD": self.password,
-            "KALSHI_API_KEY": self.api_key or ""
+            "KALSHI_API_KEY_ID": self.api_key_id,
+            "KALSHI_PRIVATE_KEY_PATH": self.private_key_path,
         }
 
     def is_complete(self) -> bool:
         """Check if all required Kalshi credentials are present."""
-        return bool(self.email and self.password)
+        return bool(self.api_key_id and (self.private_key_path or self.private_key_pem))
 
     @classmethod
     def from_env(cls, env_dict: Dict[str, str]) -> 'KalshiCredentials':
         """Create credentials from environment variables."""
-        api_key = env_dict.get("KALSHI_API_KEY", "").strip()
         return cls(
-            email=env_dict.get("KALSHI_EMAIL", "").strip(),
-            password=env_dict.get("KALSHI_PASSWORD", "").strip(),
-            api_key=api_key if api_key else None
+            api_key_id=env_dict.get("KALSHI_API_KEY_ID", "").strip(),
+            private_key_path=env_dict.get("KALSHI_PRIVATE_KEY_PATH", "").strip(),
+            private_key_pem=env_dict.get("KALSHI_PRIVATE_KEY_PEM", "").strip()
         )
 
 

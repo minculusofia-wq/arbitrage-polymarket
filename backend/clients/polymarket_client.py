@@ -94,26 +94,26 @@ class PolymarketClient(IExchangeClient):
 
             kwargs = self.credentials.to_client_kwargs()
             pk = kwargs.get("private_key", "")
-            
+
             debug_val("API_KEY", kwargs.get("key"))
             debug_val("PK", pk)
 
             # Initialize ClobClient
+            # IMPORTANT: key parameter is the PRIVATE KEY (for signing), not the API key
+            # The API credentials are set separately via set_api_creds()
             logger.info("Instantiating ClobClient...")
             self._client = ClobClient(
                 self.CLOB_HOST,
-                key=kwargs["key"],
+                key=pk,  # Private key for signing orders
                 chain_id=self.CHAIN_ID,
-                signature_type=1,  # L2 API Key
-                funder=pk
+                signature_type=2,  # POLY_GNOSIS_SAFE for EOA wallets
             )
 
             # Set API credentials for authenticated requests
             self._client.set_api_creds(
-                api_key=kwargs["key"],
-                api_secret=kwargs["secret"],
-                api_passphrase=kwargs["passphrase"]
+                self._client.create_or_derive_api_creds()
             )
+            logger.info("API credentials derived from private key")
 
             self._connected = True
             logger.info("Polymarket client connected successfully")
